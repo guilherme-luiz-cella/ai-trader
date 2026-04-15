@@ -1,0 +1,17 @@
+.git
+.gitignore
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.log
+.streamlit
+backtest
+implement
+deploy
+README.md
+run_dashboard_clean.sh
+runtime.txt
+frontend/node_modules
+frontend/dist

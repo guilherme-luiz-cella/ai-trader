@@ -113,11 +113,11 @@ For a model that actually uses the richer feature set, run [train_combined_model
 
 If you want a simple action recommendation from the latest trained model, run [generate_trade_signal.py](generate_trade_signal.py). It prints BUY, HOLD, or SELL from the latest combined dataset row.
 
-If you want an interactive planning view, run [streamlit_dashboard.py](streamlit_dashboard.py). It lets you set deposit amount, trading budget, stop-loss / take-profit limits, and withdrawal rules while showing the current model signal.
+If you want the interactive app, run the separated stack from the repo root with `docker compose up --build` and open the React frontend on `http://localhost:3000`.
 
 If you want to train an LLM on your app data, run [prepare_llm_training_data.py](prepare_llm_training_data.py). It converts your combined dataset into chat fine-tuning JSONL examples for OpenAI-compatible providers.
 
-If you want a deployable API endpoint for your live stack, run [deploy_signal_api.py](deploy_signal_api.py). It serves `/health` and `/signal` over HTTP using your latest trained model and optional LLM overlay.
+If you want a deployable API endpoint for your live stack, run `python -m backend.app` from the repo root. It serves `/health`, `/signal`, `/dashboard`, and the trading control endpoints used by the React frontend.
 
 ### Training Environment Variables
 
@@ -160,9 +160,9 @@ If you want a deployable API endpoint for your live stack, run [deploy_signal_ap
 - `LLM_TIMEOUT_SECONDS`: HTTP timeout for LLM requests, default `30`.
 - `LLM_BYPASS_ENV_PROXY`: if `true`, retries direct HTTPS without environment proxy when proxy tunnel fails.
 
-### Streamlit Cloud Free LLM Setup (Hugging Face)
+### Free LLM Setup (Hugging Face)
 
-Use Streamlit app secrets/environment variables:
+Use environment variables:
 
 - `LLM_ENABLED=true`
 - `LLM_PROVIDER=huggingface_inference`
@@ -174,7 +174,7 @@ Use Streamlit app secrets/environment variables:
 - `LLM_CONFIDENCE_FLOOR=0.40`
 - `LLM_CONFIDENCE_SOFT_GATE=true`
 
-This keeps the app deployed on Streamlit while the LLM inference runs on Hugging Face free infrastructure.
+This keeps the Python backend local or self-hosted while the LLM inference runs on Hugging Face free infrastructure.
 
 ### LLM Dataset Builder Environment Variables
 
@@ -182,22 +182,18 @@ This keeps the app deployed on Streamlit while the LLM inference runs on Hugging
 - `LLM_MAX_FEATURES`: max numeric fields per training sample.
 - `LLM_MAX_SAMPLES`: optional row cap (uses latest rows).
 
-### Signal API Environment Variables
+### Backend API Environment Variables
 
 - `SIGNAL_API_HOST`: bind host for API server, default `0.0.0.0`.
 - `SIGNAL_API_PORT`: bind port for API server, default `8765`.
 
-### Streamlit Dashboard
+### App Runtime
 
-Launch with `./.venv/bin/python -m streamlit run research/streamlit_dashboard.py`.
-
-If your shell has proxy/environment overrides that interfere with Binance/LLM APIs,
-launch with `./run_dashboard_clean.sh` from the project root. This uses the project venv
-and clears inherited proxy variables before starting Streamlit.
+Run the backend with `python -m backend.app`, or run the full app with `docker compose up --build` from the repo root.
 
 Optional Binance connectivity settings for restrictive networks:
 
 - `BINANCE_TIMEOUT_SECONDS`: timeout for Binance API requests, default `30`.
 - `BINANCE_BYPASS_ENV_PROXY`: if `true`, bypasses environment proxy settings for Binance API calls.
 
-The dashboard uses the latest model artifact and the combined dataset, and it only plans capital and risk limits. It does not place orders or move funds.
+The backend uses the latest model artifact and combined dataset, while the React frontend handles controls and visualization.

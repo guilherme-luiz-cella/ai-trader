@@ -30,7 +30,8 @@ import joblib
 import pandas as pd
 import requests
 from dotenv import load_dotenv
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier, VotingClassifier
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -221,32 +222,50 @@ def chronological_split(features: pd.DataFrame, labels: pd.Series, test_size: fl
     return x_train, x_test, y_train, y_test
 
 
-def train_model(x_train: pd.DataFrame, y_train: pd.Series) -> RandomForestClassifier:
-    model = RandomForestClassifier(
+def train_model(x_train: pd.DataFrame, y_train: pd.Series):
+    gradient_model = HistGradientBoostingClassifier(
+        learning_rate=0.05,
+        max_depth=6,
+        max_iter=350,
+        min_samples_leaf=20,
+        l2_regularization=0.1,
+        random_state=42,
+    )
+    forest_model = RandomForestClassifier(
         n_estimators=300,
         max_depth=8,
         min_samples_leaf=10,
         random_state=42,
         n_jobs=-1,
     )
-    model.fit(x_train, y_train)
-    return model
+    ensemble = VotingClassifier(
+        estimators=[
+            ("hist_gb", gradient_model),
+            ("rf", forest_model),
+        ],
+        voting="soft",
+    )
+    calibrated_model = CalibratedClassifierCV(estimator=ensemble, method="sigmoid", cv=3)
+    calibrated_model.fit(x_train, y_train)
+    return calibrated_model
 
 
-def evaluate_model(model: RandomForestClassifier, x_train: pd.DataFrame, y_train: pd.Series, x_test: pd.DataFrame, y_test: pd.Series) -> Dict[str, object]:
+def evaluate_model(model, x_train: pd.DataFrame, y_train: pd.Series, x_test: pd.DataFrame, y_test: pd.Series) -> Dict[str, object]:
     train_predictions = model.predict(x_train)
     test_predictions = model.predict(x_test)
+    test_probabilities = model.predict_proba(x_test)[:, 1]
 
     metrics = {
         "train_accuracy": float(accuracy_score(y_train, train_predictions)),
         "test_accuracy": float(accuracy_score(y_test, test_predictions)),
         "confusion_matrix": confusion_matrix(y_test, test_predictions).tolist(),
         "classification_report": classification_report(y_test, test_predictions, output_dict=True, zero_division=0),
+        "mean_test_probability": float(pd.Series(test_probabilities).mean()),
     }
     return metrics
 
 
-def save_outputs(model: RandomForestClassifier, metrics: Dict[str, object], features: pd.DataFrame, symbol: str, timeframe: str) -> TrainingResult:
+def save_outputs(model, metrics: Dict[str, object], features: pd.DataFrame, symbol: str, timeframe: str) -> TrainingResult:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     model_path = OUTPUT_DIR / f"{symbol}_{timeframe}_{stamp}_model.joblib"
     metrics_path = OUTPUT_DIR / f"{symbol}_{timeframe}_{stamp}_metrics.json"

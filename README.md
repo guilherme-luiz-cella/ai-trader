@@ -84,8 +84,62 @@ While historical performance can provide confidence in a strategy, past results 
 - talib - indicators for finance (optional local dependency for backtest/bot scripts)
 - ccxt - if you want to connect to other exchanges other than hyperliquid
 
-Note for Streamlit Cloud deployment: TA-Lib is intentionally not in `requirements.txt` because wheels/builds are often unavailable on cloud Python images. The deployed dashboard does not require TA-Lib.
+## Oracle Free VM Deployment
 
-Note for Streamlit Cloud deployment: `pandas-ta` is also intentionally not in `requirements.txt` because it pulls `numba/llvmlite`, which currently fails on Streamlit Cloud Python 3.14 images. Use `pandas-ta` only in local research/implementation environments.
+If you want full Docker Compose deployment on a free VM, use the Oracle guide:
 
-You can lock the deployment Python version with `runtime.txt` (currently `python-3.13`). If you want a different version, edit that single line and redeploy.
+- `deploy/oracle/ORACLE_DEPLOY.md`
+
+Quick start on the VM:
+
+1. `./deploy/oracle/bootstrap_vm.sh`
+2. Configure `.env` (you can copy from `.env.example`)
+3. `./deploy/oracle/deploy_app.sh`
+
+## App Architecture
+
+The app is now split into:
+
+- React frontend in `frontend/` for controls, charts, wallet/account views, and AI support UI
+- Python backend in `backend/` for signals, autopilot, trade previews, execution, wallet access, and AI services
+
+### Backend API
+
+Run locally:
+
+`python -m backend.app`
+
+Endpoints:
+
+- `GET /health`
+- `GET /signal`
+- `GET /dashboard`
+- `GET /autopilot/status`
+- `POST /autopilot/start`
+- `POST /autopilot/stop`
+- `POST /trade/preview`
+- `POST /trade/action`
+- `POST /support/chat`
+- `POST /ai/command`
+
+`/signal` accepts optional query parameters:
+
+- `buy_threshold`
+- `sell_threshold`
+- `adaptive_threshold_enabled`
+
+### Docker split stack
+
+- Backend image: `Dockerfile.backend`
+- Frontend image: `Dockerfile.frontend`
+- Backend deps: `requirements-api.txt`
+- Local stack: `docker-compose.yml`
+
+Start both services locally:
+
+`docker compose up --build`
+
+Then open:
+
+- Frontend: `http://localhost:3000`
+- Backend health: `http://localhost:8765/health`

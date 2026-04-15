@@ -75,8 +75,7 @@ def load_model(model_path: Path):
         import joblib
     except ModuleNotFoundError as exc:
         raise ModuleNotFoundError(
-            "Missing dependency 'joblib'. Run the dashboard with the project venv: "
-            "./.venv/bin/python -m streamlit run research/streamlit_dashboard.py"
+            "Missing dependency 'joblib'. Run this project with the repo virtual environment installed."
         ) from exc
 
     return joblib.load(model_path)
