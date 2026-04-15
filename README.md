@@ -81,5 +81,7 @@ While historical performance can provide confidence in a strategy, past results 
 - pandas - super important to learn its like excel for python
 - backtesting.py - this is how i backtest
 - yfinance - this is where we get free daily data
-- talib - indicators for finance
+- talib - indicators for finance (optional local dependency for backtest/bot scripts)
 - ccxt - if you want to connect to other exchanges other than hyperliquid
+
+Note for Streamlit Cloud deployment: TA-Lib is intentionally not in `requirements.txt` because wheels/builds are often unavailable on cloud Python images. The deployed dashboard does not require TA-Lib.

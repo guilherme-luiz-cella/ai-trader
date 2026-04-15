@@ -11,5 +11,4 @@ requests
 schedule
 scikit-learn
 streamlit
-talib
 termcolor
