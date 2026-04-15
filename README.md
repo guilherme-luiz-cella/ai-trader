@@ -9,6 +9,7 @@ Welcome to the Harvard Algorithmic Trading with AI repository. This open-source 
 ### Why Algorithmic Trading?
 
 Most traders face two major challenges:
+
 - **Emotional decision-making** leading to poor trades
 - **Time waste** staring at screens all day with little to no profit
 
@@ -17,21 +18,27 @@ This project is built on the hypothesis shared by Jim Simons (who built a $30 bi
 ### The RBI System Explained
 
 #### 1. Research (R)
+
 Research is the foundation of algorithmic trading. Before writing a single line of code, you must:
+
 - Study proven trading strategies
 - Understand market behaviors
 - Analyze what works for different market conditions
 - Build a solid hypothesis
 
 #### 2. Backtest (B)
+
 Backtesting validates your strategy against historical data:
+
 - Test your strategy against OHLCV (Open, High, Low, Close, Volume) data
 - Evaluate performance metrics
 - Refine parameters
 - Avoid survivorship bias
 
 #### 3. Implement (I)
+
 Only after successful research and backtesting should you:
+
 - Code your strategy
 - Set up proper risk management
 - Deploy with careful monitoring
@@ -42,6 +49,7 @@ Only after successful research and backtesting should you:
 - Step-by-step guides for each stage of the RBI system
 - Code examples and templates
 - Resources for data collection and analysis
+- A starter model-training workflow for supervised learning on historical candles
 - AI integration techniques for strategy enhancement
 - Case studies and lessons learned
 
@@ -55,19 +63,22 @@ While historical performance can provide confidence in a strategy, past results 
 
 ## Getting Started
 
-[More content to be added as the project develops] 
+[More content to be added as the project develops]
 
 ## Resources
 
 ### Tools I Use
+
 - **[Cursor](https://cursor.sh/)** - AI-powered IDE where all coding for this project takes place
 - **[Flow Pro](https://wisprflow.ai/)** - Voice-to-text AI tool used for documentation and code comments
 
 ### Prerequisites
-- **[CS50: Introduction to Computer Science](https://www.youtube.com/watch?v=3LPJfIKxwWc&list=PLhQjrBD2T381WAHyx1pq-sBfykqMBI7V4)** - This Harvard course is a prerequisite to understanding the programming concepts in this class 
+
+- **[CS50: Introduction to Computer Science](https://www.youtube.com/watch?v=3LPJfIKxwWc&list=PLhQjrBD2T381WAHyx1pq-sBfykqMBI7V4)** - This Harvard course is a prerequisite to understanding the programming concepts in this class
 
 ### Python Packages
-- pandas - super important to learn its like excel for python 
+
+- pandas - super important to learn its like excel for python
 - backtesting.py - this is how i backtest
 - yfinance - this is where we get free daily data
 - talib - indicators for finance

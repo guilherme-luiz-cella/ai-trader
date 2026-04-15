@@ -1,0 +1,15 @@
+backtesting
+ccxt
+colorama
+joblib
+numpy
+pandas
+pandas-ta
+python-dotenv
+pytz
+requests
+schedule
+scikit-learn
+streamlit
+talib
+termcolor

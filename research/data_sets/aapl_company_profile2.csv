@@ -1,0 +1,2 @@
+symbol,country,currency,estimateCurrency,exchange,finnhubIndustry,ipo,logo,marketCapitalization,name,phone,shareOutstanding,ticker,weburl
+AAPL,US,USD,USD,NASDAQ NMS - GLOBAL MARKET,Technology,1980-12-12,https://static2.finnhub.io/file/publicdatany/finnhubimage/stock_logo/AAPL.png,3799919.5541622574,Apple Inc,14089961010,14681.14,AAPL,https://www.apple.com/

@@ -1,3 +1,6 @@
+import os
+from pathlib import Path
+
 import pandas as pd
 import numpy as np
 import talib
@@ -5,8 +8,17 @@ from backtesting import Backtest, Strategy
 from backtesting.lib import crossover
 
 # Load the filtered data
-data_path = '/Users/md/Dropbox/dev/github/Harvard-Algorithmic-Trading-with-AI-/backtest/data/BTC-6h-1000wks-data.csv'
-data = pd.read_csv(data_path, parse_dates=['datetime'], index_col='datetime')
+data_path = Path(os.getenv('BACKTEST_DATA_PATH', Path(__file__).resolve().parent / 'data' / 'BTC-6h-1000wks-data.csv'))
+data = pd.read_csv(data_path)
+
+timestamp_column = 'datetime' if 'datetime' in data.columns else 'timestamp' if 'timestamp' in data.columns else None
+if timestamp_column is None:
+    raise ValueError(f'Expected a datetime or timestamp column in {data_path}')
+
+data[timestamp_column] = pd.to_datetime(data[timestamp_column])
+data = data.set_index(timestamp_column)
+data = data.rename(columns={column: column.title() for column in data.columns if column.lower() in {'open', 'high', 'low', 'close', 'volume'}})
+data = data[[column for column in ['Open', 'High', 'Low', 'Close', 'Volume'] if column in data.columns]]
 
 # Bollinger Band Squeeze with ADX Strategy
 class BBSqueezeADX(Strategy):

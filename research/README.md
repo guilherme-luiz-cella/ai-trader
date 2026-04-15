@@ -9,20 +9,24 @@ Research is the critical first step in the RBI (Research, Backtest, Implement) s
 ## Sources for Trading Strategies and Alpha Generation
 
 ### Academic Resources
+
 - **Google Scholar** - Search for peer-reviewed papers written by PhDs on trading strategies, market efficiency, and alpha generation
 - **University Repositories** - Many universities publish finance and trading research
 - **Financial Journals** - Journal of Finance, Review of Financial Studies, Journal of Financial Economics
 
 ### AI and Machine Learning
+
 - **ChatGPT** - Great for generating broad ideas that you can then research more deeply
 - **Research Papers with Code** - Find implementations of trading algorithms
 
 ### Trader Insights
+
 - **Chat with Traders** - Podcast featuring 300+ professional traders sharing their methods
 - **Market Wizards Series** - Interviews with top traders
 - **Trading Conferences** - Recordings often available online
 
 ### Online Platforms
+
 - **YouTube** - Search for technical analysis, factor investing, statistical arbitrage, etc.
 - **Trading Forums** - Quantopian archives, QuantConnect community, Elite Trader
 - **Finance Blogs** - Seeking Alpha, Quantocracy, Alpha Architect
@@ -30,6 +34,7 @@ Research is the critical first step in the RBI (Research, Backtest, Implement) s
 ## Essential Trading Books
 
 ### Trading Psychology & Philosophy
+
 - **Trading in the Zone** by Mark Douglas
 - **The Black Swan** by Nassim Nicholas Taleb
 - **Fooled by Randomness** by Nassim Nicholas Taleb
@@ -38,6 +43,7 @@ Research is the critical first step in the RBI (Research, Backtest, Implement) s
 - **A Random Walk Down Wall Street** by Burton Malkiel
 
 ### Market Structure & History
+
 - **Flash Boys** by Michael Lewis
 - **Dark Pools** by Scott Patterson
 - **The Quants** by Scott Patterson
@@ -45,6 +51,7 @@ Research is the critical first step in the RBI (Research, Backtest, Implement) s
 - **One Up on Wall Street** by Peter Lynch
 
 ### Trading Systems & Methods
+
 - **Systematic Trading** by Robert Carver
 - **Trading Systems and Methods** by Perry Kaufman
 - **How to Trade in Stocks** by Jesse Livermore
@@ -53,6 +60,7 @@ Research is the critical first step in the RBI (Research, Backtest, Implement) s
 - **The Complete Turtle Trader** by Michael Covel
 
 ### Technical & Quantitative Trading
+
 - **Advances in Financial Machine Learning** by Marcos Lopez de Prado
 - **Option Volatility and Pricing** by Sheldon Natenberg
 - **The Mathematics of Money Management** by Ralph Vince
@@ -79,6 +87,7 @@ Research is the critical first step in the RBI (Research, Backtest, Implement) s
 ## Finding Your Trading Style
 
 Remember that the goal of research is to find strategies that match:
+
 - Your personality and risk tolerance
 - Your available capital
 - Your technical capabilities
@@ -91,3 +100,54 @@ No strategy works forever, and what worked in the past doesn't always work in th
 Once you have thoroughly researched multiple trading strategies, proceed to the Backtest (B) phase to validate your ideas with historical data.
 
 > "🚀 Moon Dev's Research Tip: Read one trading book and listen to one trading podcast each week to continuously expand your knowledge base!"
+
+## Model Training
+
+If you want to train a simple machine-learning model on Finnhub candles, use [train_model.py](train_model.py). It downloads OHLCV data, builds technical features, labels each bar by the next-bar direction, trains a classifier, and saves the fitted model plus metrics into `research/artifacts/`.
+
+If Finnhub access is not available, the script falls back to the local CSV configured by `TRAIN_DATA_PATH` and can still train a model from the repo's existing historical data.
+
+If you want richer training inputs, use [build_datasets.py](build_datasets.py). It creates multiple CSVs from the repo's local price history plus Finnhub news and earnings endpoints, including company news, market news, earnings calendar, earnings surprises, and daily news features. The combined training dataset currently joins Finnhub news features with the repo's existing local price history.
+
+For a model that actually uses the richer feature set, run [train_combined_model.py](train_combined_model.py). It trains on the merged price + news dataset produced by `build_datasets.py`.
+
+If you want a simple action recommendation from the latest trained model, run [generate_trade_signal.py](generate_trade_signal.py). It prints BUY, HOLD, or SELL from the latest combined dataset row.
+
+If you want an interactive planning view, run [streamlit_dashboard.py](streamlit_dashboard.py). It lets you set deposit amount, trading budget, stop-loss / take-profit limits, and withdrawal rules while showing the current model signal.
+
+### Training Environment Variables
+
+- `FINNHUB_API_KEY`: required for data download.
+- `TRAIN_SYMBOL`: stock symbol to train on, default `AAPL`.
+- `TRAIN_TIMEFRAME`: Finnhub resolution such as `1d` or `1h`.
+- `TRAIN_LOOKBACK_DAYS`: how much history to fetch.
+- `TRAIN_TARGET_HORIZON`: how many bars ahead to predict.
+- `TRAIN_DATA_PATH`: local CSV used when Finnhub access is unavailable.
+- `TRAIN_OUTPUT_DIR`: where to save the model and metrics.
+
+### Dataset Builder Environment Variables
+
+- `DATA_OUTPUT_DIR`: where the CSV datasets are written, default `research/data_sets/`.
+- `DATA_SYMBOL`: symbol used for company news and earnings data, default `AAPL`.
+- `PRICE_DATA_PATH`: local OHLCV file used as the price history base.
+- `NEWS_LOOKBACK_DAYS`: number of days of company news to collect.
+- `MARKET_EXCHANGE`: exchange code used for the market status snapshot.
+
+### Combined Trainer Environment Variables
+
+- `COMBINED_DATASET_PATH`: path to the merged training dataset, default `research/data_sets/aapl_training_dataset.csv`.
+- `TARGET_COLUMN`: label column name, default `target`.
+- `TEST_SIZE`: fraction of rows reserved for testing, default `0.2`.
+
+### Signal Generator Environment Variables
+
+- `MODEL_PATH`: optional path to a specific `.joblib` model file.
+- `DATASET_PATH`: optional path to a specific combined dataset CSV.
+- `BUY_THRESHOLD`: probability threshold for BUY, default `0.55`.
+- `SELL_THRESHOLD`: probability threshold for SELL, default `0.45`.
+
+### Streamlit Dashboard
+
+Launch with `streamlit run research/streamlit_dashboard.py`.
+
+The dashboard uses the latest model artifact and the combined dataset, and it only plans capital and risk limits. It does not place orders or move funds.
