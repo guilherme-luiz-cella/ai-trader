@@ -107,7 +107,7 @@ If you want to train a simple machine-learning model on Finnhub candles, use [tr
 
 If Finnhub access is not available, the script falls back to the local CSV configured by `TRAIN_DATA_PATH` and can still train a model from the repo's existing historical data. For multi-symbol offline training, use `TRAIN_DATA_PATHS` with a comma-separated list of CSVs.
 
-If you want richer training inputs, use [build_datasets.py](build_datasets.py). It creates multiple CSVs from Finnhub news, earnings, and OHLCV endpoints, including multi-symbol candle history, company news, market news, earnings calendar, earnings surprises, and daily news features. The combined training dataset joins these features and labels each row by future return thresholds instead of a simple next-bar direction.
+If you want richer training inputs, use [build_datasets.py](build_datasets.py). It creates multiple CSVs from Finnhub news, earnings, and OHLCV endpoints, plus free macro/news context from FRED and GDELT, including multi-symbol candle history, company news, market news, earnings calendar, earnings surprises, daily news features, macro series, and crypto/news intensity features. The combined training dataset joins these features and labels each row by future return thresholds instead of a simple next-bar direction.
 
 For a model that actually uses the richer feature set, run [train_combined_model.py](train_combined_model.py). It trains on the merged price + news dataset produced by `build_datasets.py`.
 
@@ -145,6 +145,16 @@ If you want a deployable API endpoint for your live stack, run `python -m backen
 - `TARGET_DOWNSIDE_THRESHOLD`: downside threshold used for the negative label.
 - `NEWS_LOOKBACK_DAYS`: number of days of company news to collect.
 - `MARKET_EXCHANGE`: exchange code used for the market status snapshot.
+- `FRED_API_KEY`: free FRED API key used for macro series.
+- `FRED_SERIES_IDS`: comma-separated FRED series IDs, default `DFF,CPIAUCSL,UNRATE,DGS10,VIXCLS`.
+- `FRED_BASE_URL`: FRED API base URL, default `https://api.stlouisfed.org/fred`.
+- `FRED_TIMEOUT_SECONDS`: HTTP timeout for FRED requests.
+- `FRED_BYPASS_ENV_PROXY`: if `true`, retries FRED requests without environment proxy settings.
+- `EVENT_LOOKBACK_DAYS`: lookback window for free GDELT event/news features, default `1095`.
+- `GDELT_CRYPTO_QUERY`: keyword query for crypto/news event intensity.
+- `GDELT_MACRO_QUERY`: keyword query for macro/news event intensity.
+- `GDELT_TIMEOUT_SECONDS`: HTTP timeout for GDELT requests.
+- `GDELT_BYPASS_ENV_PROXY`: if `true`, retries GDELT requests without environment proxy settings.
 
 ### Combined Trainer Environment Variables
 

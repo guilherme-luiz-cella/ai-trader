@@ -191,6 +191,7 @@ The training pipeline now supports:
 - future-return labels with `TARGET_RETURN_THRESHOLD` and `TARGET_DOWNSIDE_THRESHOLD`
 - offline multi-file fallback training with `TRAIN_DATA_PATHS`
 - trade-memory feedback logs in `research/runtime_memory/trade_memory.jsonl`
+- free macro/news enrichment from FRED and GDELT in `research/build_datasets.py`
 
 Typical flow:
 
