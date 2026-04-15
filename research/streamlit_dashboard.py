@@ -35,6 +35,14 @@ BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
 BINANCE_TESTNET = os.getenv("BINANCE_TESTNET", "false").lower() == "true"
 CHECK_SYMBOL = os.getenv("CHECK_SYMBOL", "BTC/USDT")
+STREAMLIT_ADMIN_USER = os.getenv("STREAMLIT_ADMIN_USER", "")
+STREAMLIT_ADMIN_PASSWORD = os.getenv("STREAMLIT_ADMIN_PASSWORD", "")
+SESSION_TIMEOUT_MINUTES = int(os.getenv("SESSION_TIMEOUT_MINUTES", "30"))
+ENABLE_WITHDRAWALS = os.getenv("ENABLE_WITHDRAWALS", "false").lower() == "true"
+WITHDRAW_CONFIRM_PHRASE = os.getenv("WITHDRAW_CONFIRM_PHRASE", "WITHDRAW")
+WITHDRAW_ADDRESS_ALLOWLIST = [
+    addr.strip() for addr in os.getenv("WITHDRAW_ADDRESS_ALLOWLIST", "").split(",") if addr.strip()
+]
 
 st.set_page_config(page_title="Trading Plan Dashboard", page_icon="📈", layout="wide")
 
@@ -186,6 +194,57 @@ st.markdown(
 )
 
 
+def require_login() -> None:
+    if not STREAMLIT_ADMIN_USER or not STREAMLIT_ADMIN_PASSWORD:
+        st.error(
+            "Missing login config. Set STREAMLIT_ADMIN_USER and STREAMLIT_ADMIN_PASSWORD in .env before deployment."
+        )
+        st.stop()
+
+    now = time.time()
+    auth_ok = bool(st.session_state.get("auth_ok", False))
+    auth_ts = float(st.session_state.get("auth_ts", 0.0) or 0.0)
+    lock_until = float(st.session_state.get("auth_lock_until", 0.0) or 0.0)
+
+    if lock_until > now:
+        wait = int(lock_until - now)
+        st.error(f"Login locked temporarily. Try again in {wait}s.")
+        st.stop()
+
+    timeout_seconds = max(60, SESSION_TIMEOUT_MINUTES * 60)
+    if auth_ok and (now - auth_ts) < timeout_seconds:
+        st.session_state["auth_ts"] = now
+        return
+
+    st.session_state["auth_ok"] = False
+    st.title("Secure Login")
+    st.caption("Authentication is required to access this deployed trading panel.")
+
+    with st.form("login_form", clear_on_submit=False):
+        user = st.text_input("Username")
+        pwd = st.text_input("Password", type="password")
+        submit = st.form_submit_button("Login", use_container_width=True)
+
+    if submit:
+        if user == STREAMLIT_ADMIN_USER and pwd == STREAMLIT_ADMIN_PASSWORD:
+            st.session_state["auth_ok"] = True
+            st.session_state["auth_user"] = user
+            st.session_state["auth_ts"] = now
+            st.session_state["auth_failed_attempts"] = 0
+            st.rerun()
+        else:
+            failed = int(st.session_state.get("auth_failed_attempts", 0) or 0) + 1
+            st.session_state["auth_failed_attempts"] = failed
+            if failed >= 5:
+                st.session_state["auth_lock_until"] = now + 300
+                st.session_state["auth_failed_attempts"] = 0
+                st.error("Too many failed attempts. Locked for 5 minutes.")
+            else:
+                st.error("Invalid username or password.")
+
+    st.stop()
+
+
 def normalize_symbol(symbol: str) -> str:
     symbol = (symbol or "").strip().upper()
     if not symbol:
@@ -199,6 +258,35 @@ def split_symbol_assets(symbol: str) -> tuple[str, str]:
     symbol = normalize_symbol(symbol)
     base, quote = symbol.split("/", 1)
     return base, quote
+
+
+def get_balance_context(symbol: str) -> dict[str, float | str]:
+    exchange = get_binance_client()
+    norm_symbol = normalize_symbol(symbol)
+    base, quote = split_symbol_assets(norm_symbol)
+    balance = exchange.fetch_balance()
+
+    base_free = float(balance.get("free", {}).get(base, 0) or 0)
+    base_total = float(balance.get("total", {}).get(base, 0) or 0)
+    quote_free = float(balance.get("free", {}).get(quote, 0) or 0)
+    quote_total = float(balance.get("total", {}).get(quote, 0) or 0)
+
+    return {
+        "symbol": norm_symbol,
+        "base_asset": base,
+        "quote_asset": quote,
+        "base_free": base_free,
+        "base_total": base_total,
+        "quote_free": quote_free,
+        "quote_total": quote_total,
+    }
+
+
+def get_owned_assets() -> set[str]:
+    exchange = get_binance_client()
+    balance = exchange.fetch_balance()
+    totals = balance.get("total", {})
+    return {asset for asset, qty in totals.items() if float(qty or 0) > 0}
 
 
 def get_binance_client():
@@ -437,6 +525,7 @@ def get_wallet_snapshot() -> dict[str, Any]:
 def build_market_scan(
     max_symbols: int,
     quote_asset: str,
+    prioritize_owned_assets: bool,
 ) -> pd.DataFrame:
     exchange = get_binance_client()
     exchange.load_markets()
@@ -464,6 +553,13 @@ def build_market_scan(
             except Exception:
                 continue
 
+    owned_assets = set()
+    if prioritize_owned_assets:
+        try:
+            owned_assets = get_owned_assets()
+        except Exception:
+            owned_assets = set()
+
     rows = []
     for symbol in universe:
         t = tickers.get(symbol)
@@ -475,11 +571,15 @@ def build_market_scan(
         pct = float(t.get("percentage") or 0)
         qv = float(t.get("quoteVolume") or 0)
         spread_bps = ((ask - bid) / last * 10000) if last > 0 and ask >= bid else 0.0
-        ai_score = (abs(pct) * 1.2) + (min(qv / 1_000_000, 100.0) * 0.15) - (spread_bps * 0.05)
+        base_asset, quote = split_symbol_assets(symbol)
+        ownership_bonus = 0.8 if base_asset in owned_assets else 0.0
+        ai_score = (abs(pct) * 1.2) + (min(qv / 1_000_000, 100.0) * 0.15) - (spread_bps * 0.05) + ownership_bonus
         ai_bias = "BUY" if pct >= 0 else "SELL"
         rows.append(
             {
                 "symbol": symbol,
+            "base_asset": base_asset,
+            "owned": base_asset in owned_assets,
                 "last": last,
                 "change_pct": pct,
                 "quote_volume": qv,
@@ -500,6 +600,7 @@ def refresh_market_scan(
     max_symbols: int,
     quote_asset: str,
     min_interval_seconds: int,
+    prioritize_owned_assets: bool,
 ) -> Optional[pd.DataFrame]:
     if not enabled:
         return None
@@ -508,7 +609,11 @@ def refresh_market_scan(
     if now - last_scan < max(1, int(min_interval_seconds)):
         return st.session_state.get("market_scan_df")
 
-    df = build_market_scan(max_symbols=max_symbols, quote_asset=quote_asset)
+    df = build_market_scan(
+        max_symbols=max_symbols,
+        quote_asset=quote_asset,
+        prioritize_owned_assets=prioritize_owned_assets,
+    )
     st.session_state["market_scan_df"] = df
     st.session_state["last_market_scan_ts"] = now
     return df
@@ -519,6 +624,12 @@ def execute_account_action(
     symbol: str,
     quantity: float,
     quote_amount: float,
+    withdraw_asset: str,
+    withdraw_amount: float,
+    withdraw_address: str,
+    withdraw_network: str,
+    withdraw_address_tag: str,
+    withdraw_confirmation: str,
     dry_run: bool,
     max_api_latency_ms: int,
     max_ticker_age_ms: int,
@@ -526,7 +637,65 @@ def execute_account_action(
     min_trade_cooldown_seconds: int,
 ) -> dict[str, Any]:
     exchange = get_binance_client()
+
+    # Handle withdrawals separately from symbol-based actions.
+    if action == "withdraw":
+        asset = (withdraw_asset or "").strip().upper()
+        address = (withdraw_address or "").strip()
+        network = (withdraw_network or "").strip().upper()
+        payload = {
+            "action": action,
+            "exchange": "binance",
+            "testnet": BINANCE_TESTNET,
+            "asset": asset,
+            "withdraw_amount": withdraw_amount,
+            "withdraw_address": address,
+            "withdraw_network": network,
+            "dry_run": dry_run,
+        }
+
+        if not ENABLE_WITHDRAWALS:
+            payload["status"] = "blocked"
+            payload["message"] = "Withdrawals disabled. Set ENABLE_WITHDRAWALS=true in .env to enable."
+            return payload
+
+        if not asset or withdraw_amount <= 0 or not address:
+            payload["status"] = "blocked"
+            payload["message"] = "Withdraw requires asset, amount, and destination address."
+            return payload
+
+        if WITHDRAW_ADDRESS_ALLOWLIST and address not in WITHDRAW_ADDRESS_ALLOWLIST:
+            payload["status"] = "blocked"
+            payload["message"] = "Destination address is not in WITHDRAW_ADDRESS_ALLOWLIST."
+            return payload
+
+        if dry_run:
+            payload["status"] = "dry_run_only"
+            payload["message"] = "No withdrawal sent. Disable dry-run and confirm to execute."
+            return payload
+
+        if withdraw_confirmation.strip().upper() != WITHDRAW_CONFIRM_PHRASE.upper():
+            payload["status"] = "blocked"
+            payload["message"] = f"Withdrawal blocked: type '{WITHDRAW_CONFIRM_PHRASE}' to confirm."
+            return payload
+
+        params: dict[str, Any] = {}
+        if network:
+            params["network"] = network
+
+        result = exchange.withdraw(
+            code=asset,
+            amount=float(withdraw_amount),
+            address=address,
+            tag=(withdraw_address_tag or None),
+            params=params,
+        )
+        payload["status"] = "executed"
+        payload["result"] = result
+        return payload
+
     norm_symbol = normalize_symbol(symbol)
+    balance_ctx = get_balance_context(norm_symbol)
     ticker, metrics = get_ticker_with_metrics(norm_symbol)
     market_price = float(ticker.get("last") or get_market_price(norm_symbol))
     market_reqs = get_market_requirements(norm_symbol)
@@ -557,11 +726,18 @@ def execute_account_action(
         "min_qty": market_reqs["min_qty"],
         "min_notional": market_reqs["min_notional"],
         "qty_precision": market_reqs["qty_precision"],
+        "base_free": balance_ctx["base_free"],
+        "quote_free": balance_ctx["quote_free"],
     }
 
     if dry_run:
         payload["status"] = "dry_run_only"
         payload["message"] = "No order sent. Disable dry-run and confirm to execute on Binance."
+        return payload
+
+    if action in {"market_buy", "market_sell"} and not bool(st.session_state.get("automation_enabled", True)):
+        payload["status"] = "blocked"
+        payload["message"] = "Automation STOP is active. Re-enable automation before sending live market orders."
         return payload
 
     if not guard_ok:
@@ -587,6 +763,10 @@ def execute_account_action(
     if action == "market_buy":
         order_qty = quantity
         if order_qty <= 0 and quote_amount > 0:
+            if float(quote_amount) > float(balance_ctx["quote_free"]):
+                payload["status"] = "blocked"
+                payload["message"] = "Insufficient quote free balance for this buy."
+                return payload
             # Prefer quote-based buy to spend an exact quote amount (useful for tiny balance tests like 10 BRL).
             try:
                 result = exchange.create_market_buy_order_with_cost(norm_symbol, quote_amount)
@@ -603,11 +783,20 @@ def execute_account_action(
             if order_qty <= 0:
                 raise ValueError("Provide quantity or quote amount for market_buy.")
             order_qty = float(exchange.amount_to_precision(norm_symbol, order_qty))
+            est_cost = order_qty * market_price
+            if est_cost > float(balance_ctx["quote_free"]):
+                payload["status"] = "blocked"
+                payload["message"] = "Insufficient quote free balance for this buy quantity."
+                return payload
             result = exchange.create_order(norm_symbol, "market", "buy", order_qty)
     elif action == "market_sell":
         if quantity <= 0:
             raise ValueError("Provide quantity for market_sell.")
         sell_qty = float(exchange.amount_to_precision(norm_symbol, quantity))
+        if sell_qty > float(balance_ctx["base_free"]):
+            payload["status"] = "blocked"
+            payload["message"] = "Insufficient base free balance for this sell quantity."
+            return payload
         result = exchange.create_order(norm_symbol, "market", "sell", sell_qty)
     elif action == "cancel_all_orders":
         result = exchange.cancel_all_orders(norm_symbol)
@@ -718,6 +907,13 @@ def maybe_execute_signal_trade(
     max_spread_bps: float,
     min_trade_cooldown_seconds: int,
 ) -> dict[str, Any]:
+    if not bool(st.session_state.get("automation_enabled", True)):
+        return {
+            "status": "blocked",
+            "message": "Automation STOP is active. Autopilot is paused.",
+            "signal": signal,
+        }
+
     if signal not in {"BUY", "SELL"}:
         return {
             "status": "no_trade",
@@ -739,6 +935,12 @@ def maybe_execute_signal_trade(
         symbol=symbol,
         quantity=order_size,
         quote_amount=0.0,
+        withdraw_asset="",
+        withdraw_amount=0.0,
+        withdraw_address="",
+        withdraw_network="",
+        withdraw_address_tag="",
+        withdraw_confirmation="",
         dry_run=dry_run,
         max_api_latency_ms=max_api_latency_ms,
         max_ticker_age_ms=max_ticker_age_ms,
@@ -776,6 +978,198 @@ def compute_signal(model_path: Path, dataset_path: Path, buy_threshold: float, s
     else:
         signal = "HOLD"
     return signal, probability, full_row, features
+
+
+def clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def compute_adaptive_thresholds(
+    dataset_path: Path,
+    symbol: str,
+    base_buy_threshold: float,
+    base_sell_threshold: float,
+) -> tuple[float, float, dict[str, float | str]]:
+    volatility_pct = 0.0
+    spread_bps = 0.0
+    api_latency_ms = 0.0
+    ticker_age_ms = 0.0
+
+    # Recent realized volatility from local dataset history.
+    try:
+        raw = pd.read_csv(dataset_path)
+        if "close" in raw.columns and len(raw) >= 20:
+            close = pd.to_numeric(raw["close"], errors="coerce").dropna().tail(120)
+            if len(close) >= 20:
+                returns = close.pct_change().dropna()
+                volatility_pct = float(returns.std() * 100)
+    except Exception:
+        volatility_pct = 0.0
+
+    # Live market microstructure metrics.
+    try:
+        _, metrics = get_ticker_with_metrics(symbol)
+        spread_bps = float(metrics.get("spread_bps", 0.0) or 0.0)
+        api_latency_ms = float(metrics.get("api_latency_ms", 0.0) or 0.0)
+        ticker_age_ms = float(metrics.get("ticker_age_ms", 0.0) or 0.0)
+    except Exception:
+        spread_bps = 0.0
+        api_latency_ms = 0.0
+        ticker_age_ms = 0.0
+
+    vol_factor = clamp(volatility_pct / 2.5, 0.0, 1.0)
+    spread_factor = clamp(spread_bps / 20.0, 0.0, 1.0)
+    latency_factor = clamp(api_latency_ms / 1500.0, 0.0, 1.0)
+    staleness_factor = clamp(ticker_age_ms / 4000.0, 0.0, 1.0)
+
+    # Wider no-trade zone in noisier/slower market conditions.
+    risk_score = (0.45 * vol_factor) + (0.35 * spread_factor) + (0.10 * latency_factor) + (0.10 * staleness_factor)
+    dynamic_margin = 0.015 + (0.065 * clamp(risk_score, 0.0, 1.0))
+
+    adaptive_buy = clamp(base_buy_threshold + dynamic_margin, 0.50, 0.95)
+    adaptive_sell = clamp(base_sell_threshold - dynamic_margin, 0.05, 0.50)
+
+    min_gap = 0.08
+    if adaptive_buy - adaptive_sell < min_gap:
+        midpoint = (adaptive_buy + adaptive_sell) / 2
+        adaptive_buy = clamp(midpoint + (min_gap / 2), 0.50, 0.95)
+        adaptive_sell = clamp(midpoint - (min_gap / 2), 0.05, 0.50)
+
+    details: dict[str, float | str] = {
+        "mode": "adaptive",
+        "volatility_pct": volatility_pct,
+        "spread_bps": spread_bps,
+        "api_latency_ms": api_latency_ms,
+        "ticker_age_ms": ticker_age_ms,
+        "risk_score": risk_score,
+        "dynamic_margin": dynamic_margin,
+        "base_buy_threshold": base_buy_threshold,
+        "base_sell_threshold": base_sell_threshold,
+        "buy_threshold": adaptive_buy,
+        "sell_threshold": adaptive_sell,
+    }
+    return adaptive_buy, adaptive_sell, details
+
+
+def recommend_order_size(
+    symbol: str,
+    signal: str,
+    probability_up: float,
+    strategy_profile: str,
+    max_trade_pct: float,
+) -> dict[str, float | str | bool]:
+    norm_symbol = normalize_symbol(symbol)
+    snapshot = get_account_snapshot(norm_symbol)
+    balance_ctx = get_balance_context(norm_symbol)
+    market_price = float(snapshot.get("best_ask") or snapshot.get("best_bid") or get_market_price(norm_symbol))
+    wallet_quote = float(snapshot.get("account_value_quote", 0.0) or 0.0)
+
+    profile_risk = {
+        "conservative": 0.01,
+        "balanced": 0.02,
+        "aggressive": 0.035,
+    }
+    base_risk = profile_risk.get(strategy_profile, 0.02)
+
+    confidence = clamp(abs(float(probability_up) - 0.5) * 2.0, 0.0, 1.0)
+    confidence_multiplier = 0.6 + (0.8 * confidence)
+    target_risk_pct = min(float(max_trade_pct), base_risk * confidence_multiplier)
+
+    quote_free = float(balance_ctx.get("quote_free", 0.0) or 0.0)
+    base_free = float(balance_ctx.get("base_free", 0.0) or 0.0)
+
+    desired_notional = wallet_quote * target_risk_pct
+    hard_cap_notional = wallet_quote * float(max_trade_pct)
+    notional = min(desired_notional, hard_cap_notional)
+
+    reqs = get_market_requirements(norm_symbol)
+    min_notional = float(reqs.get("min_notional", 0.0) or 0.0)
+    min_qty = float(reqs.get("min_qty", 0.0) or 0.0)
+
+    if signal not in {"BUY", "SELL"}:
+        return {
+            "ok": False,
+            "reason": "Signal is HOLD; no order size generated.",
+            "symbol": norm_symbol,
+            "wallet_quote": wallet_quote,
+            "notional_quote": 0.0,
+            "quantity": 0.0,
+            "target_risk_pct": target_risk_pct,
+        }
+
+    if signal == "BUY" and quote_free <= 0:
+        return {
+            "ok": False,
+            "reason": "No quote free balance available for BUY.",
+            "symbol": norm_symbol,
+            "wallet_quote": wallet_quote,
+            "notional_quote": 0.0,
+            "quantity": 0.0,
+            "target_risk_pct": target_risk_pct,
+        }
+
+    if signal == "SELL" and base_free <= 0:
+        return {
+            "ok": False,
+            "reason": "No base free balance available for SELL.",
+            "symbol": norm_symbol,
+            "wallet_quote": wallet_quote,
+            "notional_quote": 0.0,
+            "quantity": 0.0,
+            "target_risk_pct": target_risk_pct,
+        }
+
+    if notional < min_notional:
+        notional = min_notional
+
+    if signal == "BUY":
+        notional = min(notional, quote_free)
+
+    if market_price <= 0:
+        return {
+            "ok": False,
+            "reason": "Invalid market price while computing order size.",
+            "symbol": norm_symbol,
+            "wallet_quote": wallet_quote,
+            "notional_quote": 0.0,
+            "quantity": 0.0,
+            "target_risk_pct": target_risk_pct,
+        }
+
+    if signal == "BUY":
+        qty = max(min_qty, notional / market_price)
+    else:
+        target_qty = max(min_qty, notional / market_price)
+        qty = min(base_free, target_qty)
+    exchange = get_binance_client()
+    qty = float(exchange.amount_to_precision(norm_symbol, qty))
+    actual_notional = qty * market_price
+
+    if qty <= 0 or actual_notional <= 0:
+        return {
+            "ok": False,
+            "reason": "Computed quantity is zero after precision rounding.",
+            "symbol": norm_symbol,
+            "wallet_quote": wallet_quote,
+            "notional_quote": 0.0,
+            "quantity": 0.0,
+            "target_risk_pct": target_risk_pct,
+        }
+
+    return {
+        "ok": True,
+        "reason": "Order size computed from wallet balance and strategy profile.",
+        "symbol": norm_symbol,
+        "wallet_quote": wallet_quote,
+        "notional_quote": actual_notional,
+        "quantity": qty,
+        "target_risk_pct": target_risk_pct,
+        "market_price": market_price,
+        "min_notional": min_notional,
+        "min_qty": min_qty,
+        "base_free": base_free,
+        "quote_free": quote_free,
+    }
 
 
 def risk_plan(deposit_amount: float, active_capital_pct: float, reserve_pct: float, max_trade_pct: float, stop_loss_pct: float, take_profit_pct: float, max_daily_loss_pct: float, max_drawdown_pct: float, withdrawal_target_pct: float) -> dict:
@@ -832,6 +1226,10 @@ for key, default in {
     "market_scan_quote_asset": "USDT",
     "market_scan_interval_seconds": 30,
     "market_scan_auto_pick_symbol": True,
+    "market_scan_prioritize_owned_assets": True,
+    "adaptive_threshold_enabled": True,
+    "strategy_profile": "balanced",
+    "auto_order_size_enabled": True,
 }.items():
     st.session_state.setdefault(key, default)
 
@@ -859,6 +1257,22 @@ with st.sidebar:
 
     buy_threshold = st.slider("Buy threshold", 0.50, 0.90, step=0.01, key="buy_threshold")
     sell_threshold = st.slider("Sell threshold", 0.10, 0.50, step=0.01, key="sell_threshold")
+    adaptive_threshold_enabled = st.checkbox(
+        "Adaptive AI thresholds",
+        key="adaptive_threshold_enabled",
+        help="When enabled, buy/sell thresholds self-adjust from volatility, spread, and data freshness.",
+    )
+    strategy_profile = st.selectbox(
+        "Strategy profile",
+        ["conservative", "balanced", "aggressive"],
+        key="strategy_profile",
+        help="Controls how aggressively order sizing uses your wallet balance.",
+    )
+    auto_order_size_enabled = st.checkbox(
+        "Auto order size from wallet",
+        key="auto_order_size_enabled",
+        help="When enabled, order quantity is computed from current balance, model confidence, and profile risk.",
+    )
 
     st.divider()
     st.header("Delay Safeguards")
@@ -900,6 +1314,11 @@ with st.sidebar:
         "Auto-pick top symbol for live/autopilot",
         key="market_scan_auto_pick_symbol",
     )
+    market_scan_prioritize_owned_assets = st.checkbox(
+        "Prioritize owned assets in scan",
+        key="market_scan_prioritize_owned_assets",
+        help="Boost symbols for assets you already hold so live trading can use your current portfolio.",
+    )
 
     st.divider()
     st.header("Capital Planning")
@@ -913,7 +1332,34 @@ with st.sidebar:
     max_drawdown_pct = st.slider("Max drawdown", 0.05, 0.50, step=0.01, key="max_drawdown_pct")
     withdrawal_target_pct = st.slider("Withdraw when account grows by", 0.05, 1.00, step=0.05, key="withdrawal_target_pct")
 
-signal, probability_up, latest_row, feature_row = compute_signal(model_path, dataset_path, buy_threshold, sell_threshold)
+effective_buy_threshold = float(buy_threshold)
+effective_sell_threshold = float(sell_threshold)
+threshold_context: dict[str, float | str] = {
+    "mode": "manual",
+    "base_buy_threshold": float(buy_threshold),
+    "base_sell_threshold": float(sell_threshold),
+    "buy_threshold": float(buy_threshold),
+    "sell_threshold": float(sell_threshold),
+    "dynamic_margin": 0.0,
+}
+
+if adaptive_threshold_enabled:
+    adaptive_buy, adaptive_sell, adaptive_details = compute_adaptive_thresholds(
+        dataset_path=dataset_path,
+        symbol=st.session_state.get("live_symbol", CHECK_SYMBOL),
+        base_buy_threshold=float(buy_threshold),
+        base_sell_threshold=float(sell_threshold),
+    )
+    effective_buy_threshold = adaptive_buy
+    effective_sell_threshold = adaptive_sell
+    threshold_context = adaptive_details
+
+signal, probability_up, latest_row, feature_row = compute_signal(
+    model_path,
+    dataset_path,
+    effective_buy_threshold,
+    effective_sell_threshold,
+)
 st.session_state["signal"] = signal
 st.session_state["probability_up"] = probability_up
 st.session_state["latest_price_fallback"] = latest_row.get("close", None)
@@ -960,6 +1406,7 @@ else:
 strip_parts = [
     f"<span class='status-pill {signal_pill_class}'>{signal}</span>",
     f"<span><strong>AI Up Prob:</strong> {probability_up:.1%}</span>",
+    f"<span style='margin-left:12px;'><strong>Buy/Sell thresholds:</strong> {effective_buy_threshold:.2f} / {effective_sell_threshold:.2f}</span>",
 ]
 
 if primary_snapshot:
@@ -978,6 +1425,9 @@ if wallet_error:
     st.caption(f"Wallet estimation unavailable: {wallet_error}")
 
 st.subheader("Current Decision")
+st.caption(
+    f"Decision rule: BUY if probability >= {effective_buy_threshold:.2f}, SELL if probability <= {effective_sell_threshold:.2f}, otherwise HOLD."
+)
 if signal == "BUY":
     st.success("Model suggests taking risk only if your limits are acceptable.")
 elif signal == "SELL":
@@ -1034,8 +1484,11 @@ st.write(
         "model_path": str(model_path),
         "dataset_path": str(dataset_path),
         "latest_timestamp": str(latest_row.get("timestamp", "")),
-        "buy_threshold": buy_threshold,
-        "sell_threshold": sell_threshold,
+        "buy_threshold": effective_buy_threshold,
+        "sell_threshold": effective_sell_threshold,
+        "threshold_mode": threshold_context.get("mode", "manual"),
+        "threshold_dynamic_margin": threshold_context.get("dynamic_margin", 0.0),
+        "threshold_risk_score": threshold_context.get("risk_score", 0.0),
     }
 )
 
@@ -1070,6 +1523,7 @@ if market_scan_enabled:
             max_symbols=int(market_scan_max_symbols),
             quote_asset=market_scan_quote_asset,
             min_interval_seconds=int(market_scan_interval_seconds),
+            prioritize_owned_assets=bool(market_scan_prioritize_owned_assets),
         )
     except Exception as scan_exc:
         st.caption(f"Market scan error: {scan_exc}")
@@ -1091,9 +1545,21 @@ with live_tab:
     with live_col1:
         live_symbol = st.text_input("Live symbol", key="live_symbol")
     with live_col2:
-        autopilot_interval_seconds = st.number_input("Autopilot interval (seconds)", min_value=5, max_value=300, key="autopilot_interval_seconds")
+        autopilot_interval_seconds = st.number_input(
+            "Autopilot interval (seconds)",
+            min_value=5,
+            max_value=300,
+            key="autopilot_interval_seconds",
+            help="How long the bot waits between each autopilot cycle.",
+        )
     with live_col3:
-        autopilot_cycles = st.number_input("Run alone cycles", min_value=1, max_value=100, key="autopilot_cycles")
+        autopilot_cycles = st.number_input(
+            "Run alone cycles",
+            min_value=1,
+            max_value=100,
+            key="autopilot_cycles",
+            help="How many times autopilot repeats the capture + decision loop before stopping.",
+        )
 
     if st.button("Capture Live Point"):
         try:
@@ -1118,9 +1584,35 @@ with live_tab:
 
     st.subheader("Run Alone (Autopilot)")
     st.write("Runs AI trading logic for multiple cycles without manual clicks.")
-    autopilot_order_size = st.number_input("Autopilot order size", min_value=0.0, step=0.001, format="%.6f", key="autopilot_order_size")
+    autopilot_order_size = st.number_input(
+        "Autopilot order size",
+        min_value=0.0,
+        step=0.001,
+        format="%.6f",
+        key="autopilot_order_size",
+        help="Base-asset amount sent per live autopilot trade. Example: for BTC/USDT, 0.001 means 0.001 BTC per order.",
+    )
     autopilot_live_enabled = st.checkbox("Allow live orders in autopilot", key="autopilot_live_enabled")
     autopilot_confirmation = st.text_input("Type AUTO to allow live autopilot trades", key="autopilot_confirmation")
+
+    autopilot_size_preview = None
+    if auto_order_size_enabled:
+        try:
+            autopilot_size_preview = recommend_order_size(
+                symbol=live_symbol,
+                signal=st.session_state.get("signal", signal),
+                probability_up=float(st.session_state.get("probability_up", probability_up)),
+                strategy_profile=strategy_profile,
+                max_trade_pct=float(max_trade_pct),
+            )
+            if autopilot_size_preview.get("ok"):
+                st.caption(
+                    f"Auto size: qty={autopilot_size_preview['quantity']:.8f} | notional≈{autopilot_size_preview['notional_quote']:.4f}"
+                )
+            else:
+                st.caption(f"Auto size unavailable: {autopilot_size_preview.get('reason')}")
+        except Exception as size_exc:
+            st.caption(f"Auto size error: {size_exc}")
 
     if st.button("Start Run Alone"):
         progress = st.progress(0)
@@ -1136,7 +1628,11 @@ with live_tab:
                 trade_result = maybe_execute_signal_trade(
                     signal=st.session_state.get("signal", signal),
                     symbol=live_symbol,
-                    order_size=float(autopilot_order_size),
+                    order_size=float(
+                        autopilot_size_preview["quantity"]
+                        if auto_order_size_enabled and isinstance(autopilot_size_preview, dict) and autopilot_size_preview.get("ok")
+                        else autopilot_order_size
+                    ),
                     allow_live=autopilot_live_enabled,
                     confirmation_text=autopilot_confirmation,
                     max_api_latency_ms=int(max_api_latency_ms),
@@ -1234,6 +1730,23 @@ with account_tab:
             confirmation = st.text_input("Type EXECUTE to confirm live action")
             run_action_submit = st.form_submit_button("Run Action", use_container_width=True)
 
+        ticket_auto_size = None
+        if auto_order_size_enabled:
+            try:
+                ticket_auto_size = recommend_order_size(
+                    symbol=action_symbol,
+                    signal="BUY" if action == "market_buy" else ("SELL" if action == "market_sell" else "HOLD"),
+                    probability_up=float(st.session_state.get("probability_up", probability_up)),
+                    strategy_profile=strategy_profile,
+                    max_trade_pct=float(max_trade_pct),
+                )
+                if isinstance(ticket_auto_size, dict) and ticket_auto_size.get("ok"):
+                    st.caption(
+                        f"Ticket auto size: qty={ticket_auto_size['quantity']:.8f} | notional≈{ticket_auto_size['notional_quote']:.4f}"
+                    )
+            except Exception as ticket_size_exc:
+                st.caption(f"Ticket auto size error: {ticket_size_exc}")
+
         try:
             _preview_price = get_market_price(action_symbol.strip())
             _preview_reqs = get_market_requirements(action_symbol.strip())
@@ -1261,8 +1774,18 @@ with account_tab:
                     result = execute_account_action(
                         action=action,
                         symbol=action_symbol.strip(),
-                        quantity=float(quantity),
+                        quantity=float(
+                            ticket_auto_size["quantity"]
+                            if auto_order_size_enabled and isinstance(ticket_auto_size, dict) and ticket_auto_size.get("ok")
+                            else quantity
+                        ),
                         quote_amount=float(quote_amount),
+                        withdraw_asset="",
+                        withdraw_amount=0.0,
+                        withdraw_address="",
+                        withdraw_network="",
+                        withdraw_address_tag="",
+                        withdraw_confirmation="",
                         dry_run=dry_run,
                         max_api_latency_ms=int(max_api_latency_ms),
                         max_ticker_age_ms=int(max_ticker_age_ms),
