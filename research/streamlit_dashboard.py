@@ -42,19 +42,30 @@ BINANCE_TESTNET = os.getenv("BINANCE_TESTNET", "false").lower() == "true"
 CHECK_SYMBOL = os.getenv("CHECK_SYMBOL", "BTC/USDT")
 DASHBOARD_USERNAME = os.getenv("DASHBOARD_USERNAME", "admin")
 DASHBOARD_PASSWORD_HASH = os.getenv("DASHBOARD_PASSWORD_HASH", "")
+STABLE_ASSETS = {"USDT", "USDC", "BUSD", "FDUSD", "DAI"}
 
 st.set_page_config(page_title="Trading Plan Dashboard", page_icon="📈", layout="wide")
 
+_PBKDF2_ITERATIONS = 600_000
+
 
 def _verify_password(password: str) -> bool:
-    """Check password against the stored SHA-256 hash.
+    """Check *password* against a PBKDF2-HMAC-SHA256 hex digest.
+
+    Generate the hash value for ``DASHBOARD_PASSWORD_HASH`` with::
+
+        python -c "import hashlib; print(hashlib.pbkdf2_hmac(
+            'sha256', b'<password>', b'<username>', 600_000).hex())"
 
     When ``DASHBOARD_PASSWORD_HASH`` is empty the login gate is skipped so
     the dashboard still works out-of-the-box for local development.
     """
     if not DASHBOARD_PASSWORD_HASH:
         return True
-    candidate = hashlib.sha256(password.encode()).hexdigest()
+    salt = DASHBOARD_USERNAME.encode()
+    candidate = hashlib.pbkdf2_hmac(
+        "sha256", password.encode(), salt, _PBKDF2_ITERATIONS,
+    ).hex()
     return hmac.compare_digest(candidate, DASHBOARD_PASSWORD_HASH.lower())
 
 
@@ -444,7 +455,7 @@ def get_wallet_snapshot() -> dict[str, Any]:
         used = float(used_map.get(asset, 0) or 0)
 
         est_usdt = 0.0
-        if asset in {"USDT", "USDC", "BUSD", "FDUSD", "DAI"}:
+        if asset in STABLE_ASSETS:
             est_usdt = total
         else:
             pair = f"{asset}/USDT"
@@ -486,10 +497,21 @@ def execute_withdraw(
     quote_asset: str = "USDT",
     dry_run: bool = True,
 ) -> dict[str, Any]:
-    """Sell *sell_pct* (0-1) of a held asset into the quote currency."""
+    """Sell *sell_pct* (0‑1) of a held asset into the quote currency.
+
+    Returns a dict with ``status`` being one of:
+
+    * ``"blocked"`` – validation failed (missing balance, bad pair, etc.)
+    * ``"dry_run_only"`` – order was not sent (dry-run mode)
+    * ``"executed"`` – market sell order was placed successfully
+    """
+    quote_asset = (quote_asset or "USDT").strip().upper()
+    if not quote_asset:
+        return {"status": "blocked", "message": "Quote asset must not be empty."}
+
     exchange = get_binance_client()
     balance = exchange.fetch_balance()
-    free_qty = float(balance.get("free", {}).get(asset, 0) or 0)
+    free_qty = float(balance.get("free", {}).get(asset, 0.0))
 
     if free_qty <= 0:
         return {"status": "blocked", "message": f"No free balance found for {asset}."}
@@ -1327,11 +1349,10 @@ with withdraw_tab:
     if wd_wallet:
         balances_df_wd = wd_wallet.get("balances")
         if isinstance(balances_df_wd, pd.DataFrame) and not balances_df_wd.empty:
-            stables = {"USDT", "USDC", "BUSD", "FDUSD", "DAI"}
             tradeable_assets = [
                 row["asset"]
                 for _, row in balances_df_wd.iterrows()
-                if row["asset"] not in stables and float(row["free"]) > 0
+                if row["asset"] not in STABLE_ASSETS and float(row["free"]) > 0
             ]
 
     if tradeable_assets:
