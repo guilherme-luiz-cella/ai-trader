@@ -7,10 +7,15 @@ This dashboard helps you:
 - estimate position size and cash reserves
 - define when to stop trading or withdraw funds
 - execute Binance spot orders with safeguards
+- login authentication to protect your trading dashboard
+- stop automated trading with a single click
+- withdraw funds quickly from any held asset
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 import re
 import sys
@@ -35,8 +40,49 @@ BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
 BINANCE_TESTNET = os.getenv("BINANCE_TESTNET", "false").lower() == "true"
 CHECK_SYMBOL = os.getenv("CHECK_SYMBOL", "BTC/USDT")
+DASHBOARD_USERNAME = os.getenv("DASHBOARD_USERNAME", "admin")
+DASHBOARD_PASSWORD_HASH = os.getenv("DASHBOARD_PASSWORD_HASH", "")
 
 st.set_page_config(page_title="Trading Plan Dashboard", page_icon="📈", layout="wide")
+
+
+def _verify_password(password: str) -> bool:
+    """Check password against the stored SHA-256 hash.
+
+    When ``DASHBOARD_PASSWORD_HASH`` is empty the login gate is skipped so
+    the dashboard still works out-of-the-box for local development.
+    """
+    if not DASHBOARD_PASSWORD_HASH:
+        return True
+    candidate = hashlib.sha256(password.encode()).hexdigest()
+    return hmac.compare_digest(candidate, DASHBOARD_PASSWORD_HASH.lower())
+
+
+def _login_gate() -> None:
+    """Show a login form and block the rest of the app until authenticated."""
+    if not DASHBOARD_PASSWORD_HASH:
+        st.session_state["authenticated"] = True
+        return
+
+    if st.session_state.get("authenticated"):
+        return
+
+    st.title("🔒 Login Required")
+    with st.form("login_form"):
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Login", use_container_width=True)
+
+    if submitted:
+        if username == DASHBOARD_USERNAME and _verify_password(password):
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Invalid username or password.")
+    st.stop()
+
+
+_login_gate()
 
 st.markdown(
     """
@@ -434,6 +480,48 @@ def get_wallet_snapshot() -> dict[str, Any]:
     }
 
 
+def execute_withdraw(
+    asset: str,
+    sell_pct: float,
+    quote_asset: str = "USDT",
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Sell *sell_pct* (0-1) of a held asset into the quote currency."""
+    exchange = get_binance_client()
+    balance = exchange.fetch_balance()
+    free_qty = float(balance.get("free", {}).get(asset, 0) or 0)
+
+    if free_qty <= 0:
+        return {"status": "blocked", "message": f"No free balance found for {asset}."}
+
+    sell_qty = free_qty * min(max(sell_pct, 0.0), 1.0)
+    pair = f"{asset}/{quote_asset}"
+    exchange.load_markets()
+    if pair not in exchange.markets:
+        return {"status": "blocked", "message": f"Market {pair} not found on Binance."}
+
+    sell_qty = float(exchange.amount_to_precision(pair, sell_qty))
+    if sell_qty <= 0:
+        return {"status": "blocked", "message": "Sell quantity rounds to zero after precision."}
+
+    if dry_run:
+        return {
+            "status": "dry_run_only",
+            "pair": pair,
+            "sell_qty": sell_qty,
+            "free_qty": free_qty,
+            "message": "No order sent (dry-run). Disable dry-run and confirm to execute.",
+        }
+
+    result = exchange.create_order(pair, "market", "sell", sell_qty)
+    return {
+        "status": "executed",
+        "pair": pair,
+        "sell_qty": sell_qty,
+        "result": result,
+    }
+
+
 def build_market_scan(
     max_symbols: int,
     quote_asset: str,
@@ -821,6 +909,7 @@ for key, default in {
     "autopilot_order_size": 0.001,
     "autopilot_live_enabled": False,
     "autopilot_confirmation": "",
+    "autopilot_stop_requested": False,
     "max_api_latency_ms": 1200,
     "max_ticker_age_ms": 3000,
     "max_spread_bps": 20.0,
@@ -838,8 +927,16 @@ for key, default in {
 apply_pending_widget_updates()
 
 
-st.title("Trading Plan Dashboard")
-st.write("Use this dashboard to manage risk, monitor live AI trading signals, and run an autopilot cycle with safety checks.")
+# Header with logout button
+header_left, header_right = st.columns([0.85, 0.15])
+with header_left:
+    st.title("Trading Plan Dashboard")
+with header_right:
+    if DASHBOARD_PASSWORD_HASH and st.button("Logout 🔓"):
+        st.session_state["authenticated"] = False
+        st.rerun()
+
+st.write("Manage risk, monitor live AI trading signals, and run an autopilot cycle with safety checks.")
 
 try:
     import joblib  # noqa: F401
@@ -985,10 +1082,11 @@ elif signal == "SELL":
 else:
     st.warning("Model is neutral. Waiting is usually the lower-risk choice.")
 
-overview_tab, live_tab, wallet_tab, account_tab, ai_tab = st.tabs([
+overview_tab, live_tab, wallet_tab, withdraw_tab, account_tab, ai_tab = st.tabs([
     "Market Overview",
     "Live Terminal",
     "My Wallet",
+    "Withdraw",
     "Trade Ticket",
     "AI Commands",
 ])
@@ -1122,11 +1220,21 @@ with live_tab:
     autopilot_live_enabled = st.checkbox("Allow live orders in autopilot", key="autopilot_live_enabled")
     autopilot_confirmation = st.text_input("Type AUTO to allow live autopilot trades", key="autopilot_confirmation")
 
-    if st.button("Start Run Alone"):
+    start_col, stop_col = st.columns(2)
+    start_autopilot = start_col.button("▶ Start Run Alone", use_container_width=True)
+    if stop_col.button("⏹ Stop Autopilot", use_container_width=True):
+        st.session_state["autopilot_stop_requested"] = True
+        st.warning("Stop requested — autopilot will halt after the current cycle.")
+
+    if start_autopilot:
+        st.session_state["autopilot_stop_requested"] = False
         progress = st.progress(0)
         status_box = st.empty()
         logs = []
         for cycle in range(int(autopilot_cycles)):
+            if st.session_state.get("autopilot_stop_requested"):
+                status_box.warning(f"Autopilot stopped by user after {cycle} cycle(s).")
+                break
             try:
                 point = append_live_history(
                     live_symbol,
@@ -1165,6 +1273,7 @@ with live_tab:
             if cycle + 1 < int(autopilot_cycles):
                 time.sleep(int(autopilot_interval_seconds))
 
+        st.session_state["autopilot_stop_requested"] = False
         st.success("Autopilot run completed.")
         st.dataframe(pd.DataFrame(logs), use_container_width=True)
 
@@ -1201,6 +1310,55 @@ with wallet_tab:
             st.dataframe(balances_df, use_container_width=True)
         else:
             st.info("No non-zero balances found in this wallet.")
+
+with withdraw_tab:
+    st.subheader("Withdraw / Sell Assets")
+    st.caption("Sell a percentage of any held asset back to a quote currency (e.g. USDT).")
+
+    wd_wallet = st.session_state.get("wallet_snapshot")
+    if wd_wallet is None:
+        try:
+            wd_wallet = get_wallet_snapshot()
+            st.session_state["wallet_snapshot"] = wd_wallet
+        except Exception as exc:
+            st.error(str(exc))
+
+    tradeable_assets: list[str] = []
+    if wd_wallet:
+        balances_df_wd = wd_wallet.get("balances")
+        if isinstance(balances_df_wd, pd.DataFrame) and not balances_df_wd.empty:
+            stables = {"USDT", "USDC", "BUSD", "FDUSD", "DAI"}
+            tradeable_assets = [
+                row["asset"]
+                for _, row in balances_df_wd.iterrows()
+                if row["asset"] not in stables and float(row["free"]) > 0
+            ]
+
+    if tradeable_assets:
+        with st.form("withdraw_form", clear_on_submit=False):
+            wd_asset = st.selectbox("Asset to sell", tradeable_assets)
+            wd_pct = st.slider("Percentage to sell", 1, 100, 100, step=1)
+            wd_quote = st.text_input("Quote currency", value="USDT")
+            wd_dry_run = st.checkbox("Dry-run mode", value=True)
+            wd_confirm = st.text_input("Type WITHDRAW to confirm live sell")
+            wd_submit = st.form_submit_button("Sell Asset", use_container_width=True)
+
+        if wd_submit:
+            if not wd_dry_run and wd_confirm.strip().upper() != "WITHDRAW":
+                st.error("Live sell blocked: type WITHDRAW in the confirmation box.")
+            else:
+                try:
+                    wd_result = execute_withdraw(
+                        asset=wd_asset,
+                        sell_pct=wd_pct / 100.0,
+                        quote_asset=wd_quote.strip().upper(),
+                        dry_run=wd_dry_run,
+                    )
+                    st.json(wd_result)
+                except Exception as exc:
+                    st.error(str(exc))
+    else:
+        st.info("No tradeable (non-stable) assets with a free balance. Deposit or buy an asset first.")
 
 with account_tab:
     st.subheader("Trade Ticket")
@@ -1288,6 +1446,6 @@ with ai_tab:
         st.success(message)
 
 # Keep the panel continuously live by triggering timed reruns.
-if auto_refresh_enabled:
+if auto_refresh_enabled and not st.session_state.get("autopilot_stop_requested"):
     time.sleep(int(auto_refresh_interval_seconds))
     st.rerun()
