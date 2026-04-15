@@ -31,6 +31,21 @@ PROJECT_ROOT = BASE_DIR.parent
 sys.path.insert(0, str(BASE_DIR))
 load_dotenv(PROJECT_ROOT / ".env", override=True)
 
+
+def _inject_streamlit_secrets_into_env() -> None:
+    try:
+        for key in st.secrets.keys():
+            value = st.secrets.get(key)
+            if value is None:
+                continue
+            os.environ[str(key)] = str(value)
+    except Exception:
+        # If secrets are unavailable (e.g., local non-Streamlit context), keep current env.
+        pass
+
+
+_inject_streamlit_secrets_into_env()
+
 from generate_trade_signal import (  # noqa: E402
     ADAPTIVE_THRESHOLD_ENABLED,
     LLM_API_KEY,
