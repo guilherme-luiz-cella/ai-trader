@@ -42,6 +42,9 @@ from generate_trade_signal import (  # noqa: E402
 
 ARTIFACTS_DIR = RESEARCH_DIR / "artifacts"
 DATA_DIR = RESEARCH_DIR / "data_sets"
+MEMORY_DIR = RESEARCH_DIR / "runtime_memory"
+MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+TRADE_MEMORY_PATH = MEMORY_DIR / "trade_memory.jsonl"
 
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
@@ -79,6 +82,62 @@ AUTOPILOT_STATE: dict[str, Any] = {
 
 def utc_now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def append_trade_memory(entry: dict[str, Any]) -> None:
+    record = {"recorded_at": utc_now_iso(), **entry}
+    with TRADE_MEMORY_PATH.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=True) + "\n")
+
+
+def log_trade_memory(
+    *,
+    source: str,
+    symbol: str,
+    action: str,
+    payload: dict[str, Any],
+    signal: str | None = None,
+    probability_up: float | None = None,
+    cycle: int | None = None,
+    target_cycles: int | None = None,
+    size_plan: dict[str, Any] | None = None,
+    account_snapshot: dict[str, Any] | None = None,
+) -> None:
+    append_trade_memory(
+        {
+            "source": source,
+            "exchange": payload.get("exchange", "binance"),
+            "symbol": normalize_symbol(symbol),
+            "action": action,
+            "signal": signal,
+            "probability_up": probability_up,
+            "cycle": cycle,
+            "target_cycles": target_cycles,
+            "status": payload.get("status"),
+            "message": payload.get("message") or payload.get("guard_message") or payload.get("minimum_message") or "",
+            "dry_run": bool(payload.get("dry_run", False)),
+            "guard_ok": payload.get("guard_ok"),
+            "guard_message": payload.get("guard_message"),
+            "minimum_ok": payload.get("minimum_ok"),
+            "minimum_message": payload.get("minimum_message"),
+            "quantity": float(payload.get("quantity") or 0.0),
+            "quote_amount": float(payload.get("quote_amount") or 0.0),
+            "market_price": float(payload.get("market_price") or 0.0),
+            "api_latency_ms": payload.get("api_latency_ms"),
+            "ticker_age_ms": payload.get("ticker_age_ms"),
+            "spread_bps": payload.get("spread_bps"),
+            "min_qty": payload.get("min_qty"),
+            "min_notional": payload.get("min_notional"),
+            "result": payload.get("result"),
+            "account_value_quote": (account_snapshot or {}).get("account_value_quote"),
+            "best_bid": (account_snapshot or {}).get("best_bid"),
+            "best_ask": (account_snapshot or {}).get("best_ask"),
+            "size_strength": (size_plan or {}).get("strength"),
+            "allocation_pct": (size_plan or {}).get("allocation_pct"),
+            "quote_size": (size_plan or {}).get("quote_size"),
+            "base_size": (size_plan or {}).get("base_size"),
+        }
+    )
 
 
 def set_runtime_value(key: str, value: Any) -> None:
@@ -547,10 +606,12 @@ def execute_account_action(
     if dry_run:
         payload["status"] = "dry_run_only"
         payload["message"] = "No order sent. Disable dry-run to execute on Binance."
+        log_trade_memory(source="trade_action", symbol=norm_symbol, action=action, payload=payload)
         return payload
     if not guard_ok:
         payload["status"] = "blocked"
         payload["message"] = guard_message
+        log_trade_memory(source="trade_action", symbol=norm_symbol, action=action, payload=payload)
         return payload
     minimum_ok, minimum_message = validate_order_minimums(
         action=action,
@@ -565,6 +626,7 @@ def execute_account_action(
     if not minimum_ok:
         payload["status"] = "blocked"
         payload["message"] = minimum_message
+        log_trade_memory(source="trade_action", symbol=norm_symbol, action=action, payload=payload)
         return payload
     if action == "market_buy":
         if quantity <= 0 and quote_amount > 0:
@@ -589,6 +651,7 @@ def execute_account_action(
     payload["status"] = "executed"
     payload["result"] = result
     set_runtime_value("last_trade_ts", time.time())
+    log_trade_memory(source="trade_action", symbol=norm_symbol, action=action, payload=payload)
     return payload
 
 
@@ -677,6 +740,9 @@ def resolve_latest_model() -> Path:
 
 
 def resolve_dataset_path() -> Path:
+    multi_symbol = DATA_DIR / "multi_symbol_training_dataset.csv"
+    if multi_symbol.exists():
+        return multi_symbol
     preferred = DATA_DIR / "aapl_training_dataset.csv"
     if preferred.exists():
         return preferred
@@ -1119,6 +1185,19 @@ def run_autopilot(config: dict[str, Any]) -> None:
                 max_ticker_age_ms=int(config.get("max_ticker_age_ms", 3000)),
                 max_spread_bps=float(config.get("max_spread_bps", 20.0)),
                 min_trade_cooldown_seconds=int(config.get("min_trade_cooldown_seconds", 5)),
+            )
+            trade_action = "market_buy" if signal == "BUY" else "market_sell" if signal == "SELL" else "hold"
+            log_trade_memory(
+                source="autopilot",
+                symbol=symbol,
+                action=trade_action,
+                payload=trade_result,
+                signal=signal,
+                probability_up=probability_up,
+                cycle=cycle_index + 1,
+                target_cycles=effective_cycles,
+                size_plan=size_plan,
+                account_snapshot=snapshot,
             )
             append_autopilot_log(
                 {

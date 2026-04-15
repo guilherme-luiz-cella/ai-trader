@@ -303,10 +303,9 @@ function App() {
     const interval = window.setInterval(() => {
       refreshHealth();
       refreshAutopilotStatus();
-      refreshDashboard(config, { silent: true });
-    }, 4000);
+    }, 5000);
     return () => window.clearInterval(interval);
-  }, [config]);
+  }, []);
 
   function updateConfigField(name, value) {
     setConfig((current) => ({ ...current, [name]: value }));

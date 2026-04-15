@@ -44,10 +44,13 @@ TRAIN_SYMBOL = os.getenv("TRAIN_SYMBOL", "AAPL")
 TRAIN_TIMEFRAME = os.getenv("TRAIN_TIMEFRAME", "1d")
 TRAIN_LOOKBACK_DAYS = int(os.getenv("TRAIN_LOOKBACK_DAYS", "730"))
 TRAIN_TARGET_HORIZON = int(os.getenv("TRAIN_TARGET_HORIZON", "1"))
+TRAIN_TARGET_RETURN_THRESHOLD = float(os.getenv("TRAIN_TARGET_RETURN_THRESHOLD", "0.003"))
+TRAIN_TARGET_DOWNSIDE_THRESHOLD = float(os.getenv("TRAIN_TARGET_DOWNSIDE_THRESHOLD", "-0.003"))
 TRAIN_DATA_PATH = os.getenv(
     "TRAIN_DATA_PATH",
     str(BASE_DIR.parent / "backtest" / "data" / "BTC-6h-1000wks-data.csv"),
 )
+TRAIN_DATA_PATHS = [item.strip() for item in os.getenv("TRAIN_DATA_PATHS", TRAIN_DATA_PATH).split(",") if item.strip()]
 
 TIMEFRAME_TO_RESOLUTION = {
     "1m": "1",
@@ -143,6 +146,7 @@ def load_local_candles(data_path: str) -> pd.DataFrame:
 
     data = data.rename(columns={timestamp_column: "timestamp"})
     data = data[["timestamp"] + required_columns]
+    data["symbol"] = path.stem.upper()
     return data.sort_values("timestamp").reset_index(drop=True)
 
 
@@ -180,12 +184,21 @@ def build_features(data: pd.DataFrame) -> pd.DataFrame:
     return frame
 
 
-def build_dataset(data: pd.DataFrame, target_horizon: int) -> Tuple[pd.DataFrame, pd.Series]:
+def build_dataset(
+    data: pd.DataFrame,
+    target_horizon: int,
+    target_return_threshold: float,
+    target_downside_threshold: float,
+) -> Tuple[pd.DataFrame, pd.Series]:
     frame = build_features(data)
+    frame["symbol_code"] = frame.get("symbol", "DEFAULT").astype("category").cat.codes
     frame["future_return"] = frame["close"].shift(-target_horizon) / frame["close"] - 1
-    frame["target"] = (frame["future_return"] > 0).astype(int)
+    frame["target"] = pd.NA
+    frame.loc[frame["future_return"] >= target_return_threshold, "target"] = 1
+    frame.loc[frame["future_return"] <= target_downside_threshold, "target"] = 0
 
     feature_columns = [
+        "symbol_code",
         "return_1",
         "return_3",
         "return_5",
@@ -204,7 +217,8 @@ def build_dataset(data: pd.DataFrame, target_horizon: int) -> Tuple[pd.DataFrame
         "distance_from_low_10",
     ]
 
-    dataset = frame[["timestamp"] + feature_columns + ["target"]].dropna().reset_index(drop=True)
+    dataset = frame[["timestamp", "symbol"] + feature_columns + ["future_return", "target"]].dropna().reset_index(drop=True)
+    dataset["target"] = dataset["target"].astype(int)
     features = dataset[feature_columns]
     labels = dataset["target"].astype(int)
     return dataset, labels
@@ -301,15 +315,21 @@ def main() -> None:
             raise RuntimeError("FINNHUB_API_KEY is not set")
 
         candles = fetch_finnhub_candles(TRAIN_SYMBOL, TRAIN_TIMEFRAME, TRAIN_LOOKBACK_DAYS)
+        candles["symbol"] = TRAIN_SYMBOL
     except Exception as error:
         print(f"Finnhub training data unavailable: {error}")
-        print(f"Falling back to local CSV: {TRAIN_DATA_PATH}")
-        candles = load_local_candles(TRAIN_DATA_PATH)
-        source_symbol = Path(TRAIN_DATA_PATH).stem
+        print(f"Falling back to local CSV path(s): {', '.join(TRAIN_DATA_PATHS)}")
+        candles = pd.concat([load_local_candles(path) for path in TRAIN_DATA_PATHS], ignore_index=True).sort_values(["symbol", "timestamp"]).reset_index(drop=True)
+        source_symbol = "multi_symbol_local" if len(TRAIN_DATA_PATHS) > 1 else Path(TRAIN_DATA_PATHS[0]).stem
         source_timeframe = "local"
 
-    dataset, labels = build_dataset(candles, TRAIN_TARGET_HORIZON)
-    feature_columns = [column for column in dataset.columns if column not in {"timestamp", "target"}]
+    dataset, labels = build_dataset(
+        candles,
+        TRAIN_TARGET_HORIZON,
+        TRAIN_TARGET_RETURN_THRESHOLD,
+        TRAIN_TARGET_DOWNSIDE_THRESHOLD,
+    )
+    feature_columns = [column for column in dataset.columns if column not in {"timestamp", "symbol", "future_return", "target"}]
     features = dataset[feature_columns]
     x_train, x_test, y_train, y_test = chronological_split(features, labels)
 

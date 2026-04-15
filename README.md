@@ -171,3 +171,18 @@ Workflow behavior:
 - training workflow runs manually from GitHub Actions with `workflow_dispatch`
 
 This lets you push from the Mac and have the Windows machine rebuild or train remotely without sitting near the desktop.
+
+## Stronger Model Training
+
+The training pipeline now supports:
+
+- multi-symbol dataset builds with `DATA_SYMBOLS=AAPL,MSFT,NVDA`
+- future-return labels with `TARGET_RETURN_THRESHOLD` and `TARGET_DOWNSIDE_THRESHOLD`
+- offline multi-file fallback training with `TRAIN_DATA_PATHS`
+- trade-memory feedback logs in `research/runtime_memory/trade_memory.jsonl`
+
+Typical flow:
+
+1. `python research/build_datasets.py`
+2. `python research/train_combined_model.py`
+3. or `python research/train_model.py`

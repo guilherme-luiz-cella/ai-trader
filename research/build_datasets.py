@@ -39,6 +39,7 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 DATA_SYMBOL = os.getenv("DATA_SYMBOL", "AAPL")
+DATA_SYMBOLS = [symbol.strip().upper() for symbol in os.getenv("DATA_SYMBOLS", DATA_SYMBOL).split(",") if symbol.strip()]
 PRICE_DATA_PATH = Path(
     os.getenv(
         "PRICE_DATA_PATH",
@@ -47,6 +48,27 @@ PRICE_DATA_PATH = Path(
 )
 NEWS_LOOKBACK_DAYS = int(os.getenv("NEWS_LOOKBACK_DAYS", "365"))
 MARKET_EXCHANGE = os.getenv("MARKET_EXCHANGE", "US")
+DATA_TIMEFRAME = os.getenv("DATA_TIMEFRAME", "1d")
+DATA_LOOKBACK_DAYS = int(os.getenv("DATA_LOOKBACK_DAYS", "730"))
+TARGET_HORIZON = int(os.getenv("TARGET_HORIZON", "1"))
+TARGET_RETURN_THRESHOLD = float(os.getenv("TARGET_RETURN_THRESHOLD", "0.003"))
+TARGET_DOWNSIDE_THRESHOLD = float(os.getenv("TARGET_DOWNSIDE_THRESHOLD", "-0.003"))
+
+TIMEFRAME_TO_RESOLUTION = {
+    "1m": "1",
+    "5m": "5",
+    "15m": "15",
+    "30m": "30",
+    "1h": "60",
+    "2h": "120",
+    "4h": "240",
+    "6h": "360",
+    "1d": "D",
+    "1w": "W",
+    "1mo": "M",
+    "1mth": "M",
+    "1M": "M",
+}
 
 POSITIVE_WORDS = {
     "beat",
@@ -99,6 +121,43 @@ def fetch_json(url: str, params: dict) -> object:
     return response.json()
 
 
+def timeframe_to_resolution(timeframe: str) -> str:
+    if timeframe not in TIMEFRAME_TO_RESOLUTION:
+        raise ValueError(f"Unsupported timeframe: {timeframe}")
+    return TIMEFRAME_TO_RESOLUTION[timeframe]
+
+
+def fetch_price_history_for_symbol(symbol: str, timeframe: str, lookback_days: int) -> pd.DataFrame:
+    require_finnhub_key()
+    resolution = timeframe_to_resolution(timeframe)
+    end_time = datetime.utcnow()
+    start_time = end_time - timedelta(days=lookback_days)
+    payload = fetch_json(
+        "https://finnhub.io/api/v1/stock/candle",
+        {
+            "symbol": symbol,
+            "resolution": resolution,
+            "from": int(start_time.timestamp()),
+            "to": int(end_time.timestamp()),
+            "token": FINNHUB_API_KEY,
+        },
+    )
+    if not isinstance(payload, dict) or payload.get("s") != "ok":
+        raise RuntimeError(f"Unexpected candle payload for {symbol}: {payload}")
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(payload["t"], unit="s", utc=True).tz_convert(None),
+            "open": payload["o"],
+            "high": payload["h"],
+            "low": payload["l"],
+            "close": payload["c"],
+            "volume": payload["v"],
+        }
+    )
+    frame["symbol"] = symbol
+    return frame.sort_values("timestamp").reset_index(drop=True)
+
+
 def load_price_history(path: Path) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"Price history not found: {path}")
@@ -116,6 +175,7 @@ def load_price_history(path: Path) -> pd.DataFrame:
 
     data = data.rename(columns={timestamp_column: "timestamp"})
     data = data[["timestamp"] + required_columns]
+    data["symbol"] = DATA_SYMBOL
     return data.sort_values("timestamp").reset_index(drop=True)
 
 
@@ -317,7 +377,13 @@ def build_daily_news_features(news: pd.DataFrame) -> pd.DataFrame:
     return daily
 
 
-def build_training_dataset(price_history: pd.DataFrame, daily_news: pd.DataFrame, horizon: int = 1) -> pd.DataFrame:
+def build_training_dataset(
+    price_history: pd.DataFrame,
+    daily_news: pd.DataFrame,
+    horizon: int = 1,
+    target_return_threshold: float = 0.003,
+    target_downside_threshold: float = -0.003,
+) -> pd.DataFrame:
     frame = price_history.copy()
     frame["date"] = pd.to_datetime(frame["timestamp"]).dt.date
 
@@ -334,6 +400,10 @@ def build_training_dataset(price_history: pd.DataFrame, daily_news: pd.DataFrame
     frame["volatility_10"] = frame["return_1"].rolling(10).std()
     frame["range_pct"] = (frame["high"] - frame["low"]) / frame["close"]
     frame["body_pct"] = (frame["close"] - frame["open"]) / frame["open"]
+    frame["volume_change_1"] = frame["volume"].pct_change(1)
+    frame["volume_sma_10"] = frame["volume"] / frame["volume"].rolling(10).mean() - 1
+    frame["trend_strength"] = frame["close_sma_3"] - frame["close_sma_10"]
+    frame["symbol_code"] = frame["symbol"].astype("category").cat.codes
 
     merged = frame.merge(daily_news, on="date", how="left")
     news_columns = ["news_count", "headline_score", "summary_score", "total_score", "unique_sources"]
@@ -342,9 +412,16 @@ def build_training_dataset(price_history: pd.DataFrame, daily_news: pd.DataFrame
             merged[column] = merged[column].fillna(0)
 
     merged["future_return"] = merged["close"].shift(-horizon) / merged["close"] - 1
-    merged["target"] = (merged["future_return"] > 0).astype(int)
+    merged["target"] = pd.NA
+    merged.loc[merged["future_return"] >= target_return_threshold, "target"] = 1
+    merged.loc[merged["future_return"] <= target_downside_threshold, "target"] = 0
+    merged["target"] = merged["target"].astype("float")
+    merged["target_label"] = merged["target"].map({1.0: "trade_long", 0.0: "avoid_or_short"})
+    merged["target_return_threshold"] = float(target_return_threshold)
+    merged["target_downside_threshold"] = float(target_downside_threshold)
 
     feature_columns = [
+        "symbol_code",
         "open",
         "high",
         "low",
@@ -363,6 +440,9 @@ def build_training_dataset(price_history: pd.DataFrame, daily_news: pd.DataFrame
         "volatility_10",
         "range_pct",
         "body_pct",
+        "volume_change_1",
+        "volume_sma_10",
+        "trend_strength",
         "news_count",
         "headline_score",
         "summary_score",
@@ -370,7 +450,8 @@ def build_training_dataset(price_history: pd.DataFrame, daily_news: pd.DataFrame
         "unique_sources",
     ]
 
-    dataset = merged[["timestamp", "date"] + feature_columns + ["target"]].dropna().reset_index(drop=True)
+    dataset = merged[["timestamp", "date", "symbol"] + feature_columns + ["future_return", "target", "target_label"]].dropna().reset_index(drop=True)
+    dataset["target"] = dataset["target"].astype(int)
     return dataset
 
 
@@ -382,14 +463,8 @@ def save_dataset(data: pd.DataFrame, filename: str) -> Path:
 
 def main() -> None:
     print(f"Saving datasets to: {OUTPUT_DIR}")
-
-    price_history = load_price_history(PRICE_DATA_PATH)
-    price_path = save_dataset(price_history, "price_history.csv")
-    print(f"Saved {price_path.name} ({len(price_history)} rows)")
-
-    company_news = fetch_company_news(DATA_SYMBOL, NEWS_LOOKBACK_DAYS)
-    company_news_path = save_dataset(company_news, f"{DATA_SYMBOL.lower()}_company_news.csv")
-    print(f"Saved {company_news_path.name} ({len(company_news)} rows)")
+    symbol_frames: list[pd.DataFrame] = []
+    all_company_news: list[pd.DataFrame] = []
 
     market_news = fetch_market_news()
     market_news_path = save_dataset(market_news, "market_news.csv")
@@ -399,31 +474,51 @@ def main() -> None:
     earnings_calendar_path = save_dataset(earnings_calendar, "earnings_calendar.csv")
     print(f"Saved {earnings_calendar_path.name} ({len(earnings_calendar)} rows)")
 
-    earnings_surprises = fetch_earnings_surprises(DATA_SYMBOL)
-    earnings_surprises_path = save_dataset(earnings_surprises, f"{DATA_SYMBOL.lower()}_earnings_surprises.csv")
-    print(f"Saved {earnings_surprises_path.name} ({len(earnings_surprises)} rows)")
-
-    quote = fetch_quote(DATA_SYMBOL)
-    quote_path = save_dataset(quote, f"{DATA_SYMBOL.lower()}_quote.csv")
-    print(f"Saved {quote_path.name} ({len(quote)} rows)")
-
-    company_profile2 = fetch_company_profile2(DATA_SYMBOL)
-    profile_path = save_dataset(company_profile2, f"{DATA_SYMBOL.lower()}_company_profile2.csv")
-    print(f"Saved {profile_path.name} ({len(company_profile2)} rows)")
-
-    recommendation_trends = fetch_recommendation_trends(DATA_SYMBOL)
-    recommendation_path = save_dataset(recommendation_trends, f"{DATA_SYMBOL.lower()}_recommendation_trends.csv")
-    print(f"Saved {recommendation_path.name} ({len(recommendation_trends)} rows)")
-
-    peers = fetch_company_peers(DATA_SYMBOL)
-    peers_path = save_dataset(peers, f"{DATA_SYMBOL.lower()}_peers.csv")
-    print(f"Saved {peers_path.name} ({len(peers)} rows)")
-
     market_status = fetch_market_status(MARKET_EXCHANGE)
     market_status_path = save_dataset(market_status, f"market_status_{MARKET_EXCHANGE.lower()}.csv")
     print(f"Saved {market_status_path.name} ({len(market_status)} rows)")
 
-    daily_company_news = build_daily_news_features(company_news)
+    for index, symbol in enumerate(DATA_SYMBOLS):
+        if FINNHUB_API_KEY:
+            price_history = fetch_price_history_for_symbol(symbol, DATA_TIMEFRAME, DATA_LOOKBACK_DAYS)
+        elif index == 0:
+            price_history = load_price_history(PRICE_DATA_PATH)
+            price_history["symbol"] = symbol
+        else:
+            raise RuntimeError("Multi-symbol dataset build requires FINNHUB_API_KEY so each symbol can fetch its own candles.")
+
+        symbol_frames.append(price_history)
+        company_news = fetch_company_news(symbol, NEWS_LOOKBACK_DAYS)
+        all_company_news.append(company_news)
+        company_news_path = save_dataset(company_news, f"{symbol.lower()}_company_news.csv")
+        print(f"Saved {company_news_path.name} ({len(company_news)} rows)")
+
+        earnings_surprises = fetch_earnings_surprises(symbol)
+        earnings_surprises_path = save_dataset(earnings_surprises, f"{symbol.lower()}_earnings_surprises.csv")
+        print(f"Saved {earnings_surprises_path.name} ({len(earnings_surprises)} rows)")
+
+        quote = fetch_quote(symbol)
+        quote_path = save_dataset(quote, f"{symbol.lower()}_quote.csv")
+        print(f"Saved {quote_path.name} ({len(quote)} rows)")
+
+        company_profile2 = fetch_company_profile2(symbol)
+        profile_path = save_dataset(company_profile2, f"{symbol.lower()}_company_profile2.csv")
+        print(f"Saved {profile_path.name} ({len(company_profile2)} rows)")
+
+        recommendation_trends = fetch_recommendation_trends(symbol)
+        recommendation_path = save_dataset(recommendation_trends, f"{symbol.lower()}_recommendation_trends.csv")
+        print(f"Saved {recommendation_path.name} ({len(recommendation_trends)} rows)")
+
+        peers = fetch_company_peers(symbol)
+        peers_path = save_dataset(peers, f"{symbol.lower()}_peers.csv")
+        print(f"Saved {peers_path.name} ({len(peers)} rows)")
+
+    price_history = pd.concat(symbol_frames, ignore_index=True).sort_values(["symbol", "timestamp"]).reset_index(drop=True)
+    price_path = save_dataset(price_history, "price_history.csv")
+    print(f"Saved {price_path.name} ({len(price_history)} rows)")
+
+    company_news_all = pd.concat(all_company_news, ignore_index=True) if all_company_news else pd.DataFrame()
+    daily_company_news = build_daily_news_features(company_news_all)
     daily_market_news = build_daily_news_features(market_news)
     daily_news = (
         daily_company_news.merge(daily_market_news, on="date", how="outer", suffixes=("_company", "_market"))
@@ -440,8 +535,15 @@ def main() -> None:
     daily_news_path = save_dataset(daily_news, f"{DATA_SYMBOL.lower()}_daily_news_features.csv")
     print(f"Saved {daily_news_path.name} ({len(daily_news)} rows)")
 
-    training_dataset = build_training_dataset(price_history, daily_news)
-    training_dataset_path = save_dataset(training_dataset, f"{DATA_SYMBOL.lower()}_training_dataset.csv")
+    training_dataset = build_training_dataset(
+        price_history,
+        daily_news,
+        horizon=TARGET_HORIZON,
+        target_return_threshold=TARGET_RETURN_THRESHOLD,
+        target_downside_threshold=TARGET_DOWNSIDE_THRESHOLD,
+    )
+    dataset_label = DATA_SYMBOL.lower() if len(DATA_SYMBOLS) == 1 else "multi_symbol"
+    training_dataset_path = save_dataset(training_dataset, f"{dataset_label}_training_dataset.csv")
     print(f"Saved {training_dataset_path.name} ({len(training_dataset)} rows)")
 
     print("Done")

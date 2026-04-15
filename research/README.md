@@ -103,11 +103,11 @@ Once you have thoroughly researched multiple trading strategies, proceed to the 
 
 ## Model Training
 
-If you want to train a simple machine-learning model on Finnhub candles, use [train_model.py](train_model.py). It downloads OHLCV data, builds technical features, labels each bar by the next-bar direction, trains a classifier, and saves the fitted model plus metrics into `research/artifacts/`.
+If you want to train a simple machine-learning model on Finnhub candles, use [train_model.py](train_model.py). It downloads OHLCV data, builds technical features, labels each bar by future return thresholds, trains a classifier, and saves the fitted model plus metrics into `research/artifacts/`.
 
-If Finnhub access is not available, the script falls back to the local CSV configured by `TRAIN_DATA_PATH` and can still train a model from the repo's existing historical data.
+If Finnhub access is not available, the script falls back to the local CSV configured by `TRAIN_DATA_PATH` and can still train a model from the repo's existing historical data. For multi-symbol offline training, use `TRAIN_DATA_PATHS` with a comma-separated list of CSVs.
 
-If you want richer training inputs, use [build_datasets.py](build_datasets.py). It creates multiple CSVs from the repo's local price history plus Finnhub news and earnings endpoints, including company news, market news, earnings calendar, earnings surprises, and daily news features. The combined training dataset currently joins Finnhub news features with the repo's existing local price history.
+If you want richer training inputs, use [build_datasets.py](build_datasets.py). It creates multiple CSVs from Finnhub news, earnings, and OHLCV endpoints, including multi-symbol candle history, company news, market news, earnings calendar, earnings surprises, and daily news features. The combined training dataset joins these features and labels each row by future return thresholds instead of a simple next-bar direction.
 
 For a model that actually uses the richer feature set, run [train_combined_model.py](train_combined_model.py). It trains on the merged price + news dataset produced by `build_datasets.py`.
 
@@ -126,20 +126,29 @@ If you want a deployable API endpoint for your live stack, run `python -m backen
 - `TRAIN_TIMEFRAME`: Finnhub resolution such as `1d` or `1h`.
 - `TRAIN_LOOKBACK_DAYS`: how much history to fetch.
 - `TRAIN_TARGET_HORIZON`: how many bars ahead to predict.
+- `TRAIN_TARGET_RETURN_THRESHOLD`: minimum future return required for a positive label.
+- `TRAIN_TARGET_DOWNSIDE_THRESHOLD`: downside threshold used for the negative label.
 - `TRAIN_DATA_PATH`: local CSV used when Finnhub access is unavailable.
+- `TRAIN_DATA_PATHS`: comma-separated local CSV paths for multi-symbol offline training.
 - `TRAIN_OUTPUT_DIR`: where to save the model and metrics.
 
 ### Dataset Builder Environment Variables
 
 - `DATA_OUTPUT_DIR`: where the CSV datasets are written, default `research/data_sets/`.
 - `DATA_SYMBOL`: symbol used for company news and earnings data, default `AAPL`.
+- `DATA_SYMBOLS`: comma-separated symbols for multi-symbol dataset generation.
 - `PRICE_DATA_PATH`: local OHLCV file used as the price history base.
+- `DATA_TIMEFRAME`: Finnhub candle resolution such as `1d`, `1h`, or `6h`.
+- `DATA_LOOKBACK_DAYS`: how much candle history to fetch per symbol.
+- `TARGET_HORIZON`: how many bars ahead to use for labels.
+- `TARGET_RETURN_THRESHOLD`: minimum future return required for a positive label.
+- `TARGET_DOWNSIDE_THRESHOLD`: downside threshold used for the negative label.
 - `NEWS_LOOKBACK_DAYS`: number of days of company news to collect.
 - `MARKET_EXCHANGE`: exchange code used for the market status snapshot.
 
 ### Combined Trainer Environment Variables
 
-- `COMBINED_DATASET_PATH`: path to the merged training dataset, default `research/data_sets/aapl_training_dataset.csv`.
+- `COMBINED_DATASET_PATH`: path to the merged training dataset, default `research/data_sets/multi_symbol_training_dataset.csv` when `DATA_SYMBOLS` contains multiple symbols.
 - `TARGET_COLUMN`: label column name, default `target`.
 - `TEST_SIZE`: fraction of rows reserved for testing, default `0.2`.
 
@@ -197,3 +206,11 @@ Optional Binance connectivity settings for restrictive networks:
 - `BINANCE_BYPASS_ENV_PROXY`: if `true`, bypasses environment proxy settings for Binance API calls.
 
 The backend uses the latest model artifact and combined dataset, while the React frontend handles controls and visualization.
+
+### Trade Memory For Retraining
+
+Every trade action and autopilot cycle now appends a structured record to:
+
+- `research/runtime_memory/trade_memory.jsonl`
+
+This gives you a growing feedback dataset with signal, execution status, guardrail decisions, market conditions, and sizing metadata that you can later fold back into retraining.

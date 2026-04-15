@@ -36,7 +36,7 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 DATASET_PATH = Path(
     os.getenv(
         "COMBINED_DATASET_PATH",
-        str(BASE_DIR / "data_sets" / f"{os.getenv('DATA_SYMBOL', 'AAPL').lower()}_training_dataset.csv"),
+        str(BASE_DIR / "data_sets" / ("multi_symbol_training_dataset.csv" if "," in os.getenv("DATA_SYMBOLS", "") else f"{os.getenv('DATA_SYMBOL', 'AAPL').lower()}_training_dataset.csv")),
     )
 )
 TARGET_COLUMN = os.getenv("TARGET_COLUMN", "target")
@@ -65,7 +65,7 @@ def prepare_features(data: pd.DataFrame, target_column: str) -> Tuple[pd.DataFra
     if target_column not in frame.columns:
         raise ValueError(f"Target column not found: {target_column}")
 
-    excluded_columns = {target_column, "timestamp", "date"}
+    excluded_columns = {target_column, "timestamp", "date", "symbol", "future_return", "target_label", "target_return_threshold", "target_downside_threshold"}
     feature_columns = [
         column
         for column in frame.columns
