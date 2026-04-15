@@ -1,0 +1,9 @@
+transformers>=4.45.0
+datasets>=2.20.0
+peft>=0.12.0
+accelerate>=0.33.0
+sentencepiece>=0.2.0
+safetensors>=0.4.3
+
+# Optional for QLoRA 4-bit (Windows support may vary by setup)
+# bitsandbytes>=0.43.0

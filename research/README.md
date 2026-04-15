@@ -117,6 +117,8 @@ If you want the interactive app, run the separated stack from the repo root with
 
 If you want to train an LLM on your app data, run [prepare_llm_training_data.py](prepare_llm_training_data.py). It converts your combined dataset into chat fine-tuning JSONL examples for OpenAI-compatible providers.
 
+For local adapter training on your machine, use [README_LORA.md](README_LORA.md) and [train_lora_local.py](train_lora_local.py).
+
 If you want a deployable API endpoint for your live stack, run `python -m backend.app` from the repo root. It serves `/health`, `/signal`, `/dashboard`, and the trading control endpoints used by the React frontend.
 
 ### Training Environment Variables
