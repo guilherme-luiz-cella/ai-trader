@@ -990,10 +990,12 @@ def estimate_cycles_to_goal(
 def llm_support_chat(message: str, context: dict[str, Any]) -> dict[str, Any]:
     if not LLM_ENABLED:
         return {"status": "disabled", "answer": "LLM is disabled. Enable LLM_ENABLED=true in environment."}
-    if not LLM_API_KEY:
+    if LLM_PROVIDER != "ollama" and not LLM_API_KEY:
         return {"status": "missing_api_key", "answer": "LLM_API_KEY is missing."}
     if LLM_PROVIDER in {"deepseek", "openai_compatible"}:
         endpoint = f"{LLM_BASE_URL.rstrip('/')}/chat/completions"
+    elif LLM_PROVIDER == "ollama":
+        endpoint = f"{LLM_BASE_URL.rstrip('/')}/api/chat"
     elif LLM_PROVIDER == "huggingface_inference":
         endpoint = f"{LLM_BASE_URL.rstrip('/')}/models/{LLM_MODEL}"
     else:
@@ -1004,12 +1006,24 @@ def llm_support_chat(message: str, context: dict[str, Any]) -> dict[str, Any]:
         "Explain whether ML and LLM are merged using provided context and suggest safe next actions."
     )
     user_prompt = f"User question: {message}\nCurrent engine context: {json.dumps(context, ensure_ascii=True)}"
-    headers = {"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json"}
+    if LLM_PROVIDER in {"deepseek", "openai_compatible", "huggingface_inference"}:
+        headers["Authorization"] = f"Bearer {LLM_API_KEY}"
     try:
         if LLM_PROVIDER == "huggingface_inference":
             payload: dict[str, Any] = {
                 "inputs": f"{system_prompt}\n{user_prompt}",
                 "parameters": {"max_new_tokens": 350, "temperature": 0.2, "return_full_text": False},
+            }
+        elif LLM_PROVIDER == "ollama":
+            payload = {
+                "model": LLM_MODEL,
+                "stream": False,
+                "options": {"temperature": 0.2},
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
             }
         else:
             payload = {
@@ -1030,6 +1044,8 @@ def llm_support_chat(message: str, context: dict[str, Any]) -> dict[str, Any]:
                 answer = str(data.get("generated_text", ""))
             else:
                 answer = str(data)
+        elif LLM_PROVIDER == "ollama":
+            answer = str(data.get("message", {}).get("content", ""))
         else:
             answer = str(data.get("choices", [{}])[0].get("message", {}).get("content", ""))
         if not answer.strip():

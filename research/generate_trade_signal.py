@@ -9,9 +9,9 @@ Environment variables:
 - BUY_THRESHOLD: default 0.55
 - SELL_THRESHOLD: default 0.45
 - LLM_ENABLED: set true to enable optional LLM overlay
-- LLM_PROVIDER: deepseek (default), openai_compatible, or huggingface_inference
-- LLM_MODEL: default deepseek-chat
-- LLM_BASE_URL: default https://api.deepseek.com
+- LLM_PROVIDER: ollama (default), openai_compatible, or huggingface_inference
+- LLM_MODEL: default qwen2.5:7b-instruct
+- LLM_BASE_URL: default http://127.0.0.1:11434
 - LLM_API_KEY: API key for selected provider
 - LLM_MERGE_ENABLED: set true to merge LLM with ML probability
 - LLM_MERGE_WEIGHT: 0.0-0.5 weight assigned to LLM probability view
@@ -42,9 +42,9 @@ DATASET_PATH = Path(_dataset_path_env) if _dataset_path_env else (DATA_DIR / "aa
 BUY_THRESHOLD = float(os.getenv("BUY_THRESHOLD", "0.55"))
 SELL_THRESHOLD = float(os.getenv("SELL_THRESHOLD", "0.45"))
 LLM_ENABLED = os.getenv("LLM_ENABLED", "false").lower() == "true"
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "deepseek").lower()
-LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com").rstrip("/")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").lower()
+LLM_MODEL = os.getenv("LLM_MODEL", "qwen2.5:7b-instruct")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 LLM_MERGE_ENABLED = os.getenv("LLM_MERGE_ENABLED", "false").lower() == "true"
 LLM_MERGE_WEIGHT = float(os.getenv("LLM_MERGE_WEIGHT", "0.20"))
@@ -115,6 +115,8 @@ def _row_preview(row: pd.Series, max_items: int = 20) -> dict[str, Any]:
 def _llm_endpoint() -> str:
     if LLM_PROVIDER in {"deepseek", "openai_compatible"}:
         return f"{LLM_BASE_URL}/chat/completions"
+    if LLM_PROVIDER == "ollama":
+        return f"{LLM_BASE_URL}/api/chat"
     if LLM_PROVIDER == "huggingface_inference":
         base = LLM_BASE_URL if LLM_BASE_URL else "https://api-inference.huggingface.co"
         return f"{base}/models/{LLM_MODEL}"
@@ -175,7 +177,7 @@ def generate_llm_overlay(
             "message": "LLM overlay disabled.",
         }
 
-    if not LLM_API_KEY:
+    if LLM_PROVIDER != "ollama" and not LLM_API_KEY:
         return {
             "enabled": True,
             "status": "missing_api_key",
@@ -203,9 +205,11 @@ def generate_llm_overlay(
 
     try:
         headers = {
-            "Authorization": f"Bearer {LLM_API_KEY}",
             "Content-Type": "application/json",
         }
+        if LLM_PROVIDER in {"deepseek", "openai_compatible", "huggingface_inference"}:
+            headers["Authorization"] = f"Bearer {LLM_API_KEY}"
+
         if LLM_PROVIDER == "huggingface_inference":
             hf_prompt = (
                 f"{system_prompt}\n"
@@ -219,6 +223,17 @@ def generate_llm_overlay(
                     "temperature": 0.2,
                     "return_full_text": False,
                 },
+            }
+        elif LLM_PROVIDER == "ollama":
+            payload = {
+                "model": LLM_MODEL,
+                "stream": False,
+                "format": "json",
+                "options": {"temperature": 0.2},
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(user_payload)},
+                ],
             }
         else:
             payload = {
@@ -246,6 +261,8 @@ def generate_llm_overlay(
                 content = str(response_payload.get("generated_text", ""))
             else:
                 content = str(response_payload)
+        elif LLM_PROVIDER == "ollama":
+            content = str(response_payload.get("message", {}).get("content", ""))
         else:
             content = response_payload["choices"][0]["message"]["content"]
 

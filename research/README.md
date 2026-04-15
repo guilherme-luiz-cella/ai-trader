@@ -158,7 +158,7 @@ If you want a deployable API endpoint for your live stack, run `python -m backen
 - `DATASET_PATH`: optional path to a specific combined dataset CSV.
 - `BUY_THRESHOLD`: probability threshold for BUY, default `0.55`.
 - `SELL_THRESHOLD`: probability threshold for SELL, default `0.45`.
-- `LLM_PROVIDER`: `deepseek`, `openai_compatible`, or `huggingface_inference`.
+- `LLM_PROVIDER`: `ollama` (local), `openai_compatible`, or `huggingface_inference`.
 - `LLM_MODEL`: model name for the selected provider.
 - `LLM_BASE_URL`: provider base URL.
 - `LLM_API_KEY`: provider token/key (for Hugging Face use your HF token).

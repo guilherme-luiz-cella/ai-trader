@@ -8,6 +8,7 @@ services:
     environment:
       SIGNAL_API_HOST: 0.0.0.0
       SIGNAL_API_PORT: 8765
+      LLM_BASE_URL: http://host.docker.internal:11434
     restart: unless-stopped
     ports:
       - "8765:8765"
