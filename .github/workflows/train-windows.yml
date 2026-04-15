@@ -39,6 +39,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-api.txt
 
+      - name: Build enriched dataset
+        run: |
+          python research/build_datasets.py
+
       - name: Train model
         run: |
           python research/train_combined_model.py

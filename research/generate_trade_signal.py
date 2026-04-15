@@ -17,6 +17,15 @@ Environment variables:
 - LLM_MERGE_WEIGHT: 0.0-0.5 weight assigned to LLM probability view
 - LLM_CONFIDENCE_FLOOR: minimum LLM confidence required for merge
 - ADAPTIVE_THRESHOLD_ENABLED: set true to auto-adjust thresholds
+- VOLATILITY_REGIME_ENABLED: enable volatility regime switcher
+- VOLATILITY_LOOKBACK_ROWS: recent rows used for volatility estimate
+- VOLATILITY_LOW_PCT: low-volatility threshold
+- VOLATILITY_HIGH_PCT: high-volatility threshold
+- VOLATILITY_EXTREME_PCT: extreme-volatility threshold
+- LLM_MERGE_WEIGHT_HIGH: elevated LLM merge weight in high-volatility regime
+- HIGH_REGIME_REQUIRE_LLM_CONFIRMATION: require LLM confirmation in high-volatility regime
+- HIGH_REGIME_MIN_LLM_CONFIDENCE: minimum LLM confidence for high-volatility confirmation
+- EXTREME_REGIME_FORCE_HOLD: force HOLD in extreme volatility
 """
 
 from __future__ import annotations
@@ -53,6 +62,15 @@ LLM_CONFIDENCE_SOFT_GATE = os.getenv("LLM_CONFIDENCE_SOFT_GATE", "true").lower()
 ADAPTIVE_THRESHOLD_ENABLED = os.getenv("ADAPTIVE_THRESHOLD_ENABLED", "true").lower() == "true"
 LLM_TIMEOUT_SECONDS = int(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
 LLM_BYPASS_ENV_PROXY = os.getenv("LLM_BYPASS_ENV_PROXY", "true").lower() == "true"
+VOLATILITY_REGIME_ENABLED = os.getenv("VOLATILITY_REGIME_ENABLED", "true").lower() == "true"
+VOLATILITY_LOOKBACK_ROWS = int(os.getenv("VOLATILITY_LOOKBACK_ROWS", "120"))
+VOLATILITY_LOW_PCT = float(os.getenv("VOLATILITY_LOW_PCT", "1.20"))
+VOLATILITY_HIGH_PCT = float(os.getenv("VOLATILITY_HIGH_PCT", "2.50"))
+VOLATILITY_EXTREME_PCT = float(os.getenv("VOLATILITY_EXTREME_PCT", "4.00"))
+LLM_MERGE_WEIGHT_HIGH = float(os.getenv("LLM_MERGE_WEIGHT_HIGH", "0.35"))
+HIGH_REGIME_REQUIRE_LLM_CONFIRMATION = os.getenv("HIGH_REGIME_REQUIRE_LLM_CONFIRMATION", "true").lower() == "true"
+HIGH_REGIME_MIN_LLM_CONFIDENCE = float(os.getenv("HIGH_REGIME_MIN_LLM_CONFIDENCE", "0.60"))
+EXTREME_REGIME_FORCE_HOLD = os.getenv("EXTREME_REGIME_FORCE_HOLD", "true").lower() == "true"
 
 
 def latest_file_with_suffix(folder: Path, suffix: str) -> Optional[Path]:
@@ -304,6 +322,53 @@ def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
+def compute_recent_volatility_pct(dataset_path: Path, lookback_rows: int) -> float:
+    try:
+        raw = pd.read_csv(dataset_path)
+        if "close" not in raw.columns or len(raw) < 20:
+            return 0.0
+        close = pd.to_numeric(raw["close"], errors="coerce").dropna().tail(max(20, lookback_rows))
+        if len(close) < 20:
+            return 0.0
+        returns = close.pct_change().dropna()
+        if returns.empty:
+            return 0.0
+        return float(returns.std() * 100)
+    except Exception:
+        return 0.0
+
+
+def compute_market_regime(dataset_path: Path) -> dict[str, Any]:
+    volatility_pct = compute_recent_volatility_pct(dataset_path, VOLATILITY_LOOKBACK_ROWS)
+    if not VOLATILITY_REGIME_ENABLED:
+        return {
+            "enabled": False,
+            "regime": "disabled",
+            "volatility_pct": volatility_pct,
+            "notes": "Volatility regime controller disabled.",
+        }
+
+    if volatility_pct >= VOLATILITY_EXTREME_PCT:
+        regime = "extreme"
+    elif volatility_pct >= VOLATILITY_HIGH_PCT:
+        regime = "high"
+    elif volatility_pct <= VOLATILITY_LOW_PCT:
+        regime = "low"
+    else:
+        regime = "medium"
+
+    return {
+        "enabled": True,
+        "regime": regime,
+        "volatility_pct": volatility_pct,
+        "thresholds": {
+            "low_pct": VOLATILITY_LOW_PCT,
+            "high_pct": VOLATILITY_HIGH_PCT,
+            "extreme_pct": VOLATILITY_EXTREME_PCT,
+        },
+    }
+
+
 def llm_signal_to_probability(llm_signal: str, llm_confidence: float) -> float:
     signal = (llm_signal or "HOLD").upper()
     conf = clamp(float(llm_confidence or 0.0), 0.0, 1.0)
@@ -319,6 +384,7 @@ def merge_ml_llm_decision(
     buy_threshold: float,
     sell_threshold: float,
     llm_overlay: dict[str, Any],
+    market_regime: dict[str, Any],
 ) -> dict[str, Any]:
     base = {
         "enabled": False,
@@ -344,7 +410,26 @@ def merge_ml_llm_decision(
 
     llm_conf = clamp(float(llm_overlay.get("confidence", 0.0) or 0.0), 0.0, 1.0)
     llm_prob_view = llm_signal_to_probability(str(llm_overlay.get("llm_signal", "HOLD")), llm_conf)
+    regime = str(market_regime.get("regime", "disabled"))
     base_merge_weight = clamp(LLM_MERGE_WEIGHT, 0.0, 0.5)
+    if market_regime.get("enabled"):
+        if regime == "low":
+            base_merge_weight = 0.0
+        elif regime == "high":
+            base_merge_weight = max(base_merge_weight, clamp(LLM_MERGE_WEIGHT_HIGH, 0.0, 0.5))
+        elif regime == "extreme":
+            base_merge_weight = 0.0
+
+    if base_merge_weight <= 0:
+        return {
+            "enabled": True,
+            "status": "regime_disabled_merge",
+            "merged_probability_up": float(ml_probability_up),
+            "merge_weight": 0.0,
+            "llm_probability_view": llm_prob_view,
+            "reason": f"LLM merge disabled for {regime} volatility regime.",
+        }
+
     floor = clamp(LLM_CONFIDENCE_FLOOR, 0.0, 1.0)
 
     status = "ok"
@@ -394,16 +479,7 @@ def compute_adaptive_thresholds(
     base_buy_threshold: float,
     base_sell_threshold: float,
 ) -> tuple[float, float, dict[str, float | str]]:
-    volatility_pct = 0.0
-    try:
-        raw = pd.read_csv(dataset_path)
-        if "close" in raw.columns and len(raw) >= 20:
-            close = pd.to_numeric(raw["close"], errors="coerce").dropna().tail(120)
-            if len(close) >= 20:
-                returns = close.pct_change().dropna()
-                volatility_pct = float(returns.std() * 100)
-    except Exception:
-        volatility_pct = 0.0
+    volatility_pct = compute_recent_volatility_pct(dataset_path, VOLATILITY_LOOKBACK_ROWS)
 
     vol_factor = clamp(volatility_pct / 2.5, 0.0, 1.0)
     dynamic_margin = 0.015 + (0.065 * vol_factor)
@@ -459,6 +535,8 @@ def generate_trade_decision(
         effective_sell_threshold = adaptive_sell
         threshold_context = adaptive_ctx
 
+    market_regime = compute_market_regime(dataset_path)
+
     probability = float(model.predict_proba(features)[0][1])
     if probability >= effective_buy_threshold:
         signal = "BUY"
@@ -478,6 +556,7 @@ def generate_trade_decision(
         buy_threshold=effective_buy_threshold,
         sell_threshold=effective_sell_threshold,
         llm_overlay=llm_overlay,
+        market_regime=market_regime,
     )
 
     final_probability_up = float(merge_result.get("merged_probability_up", probability))
@@ -488,17 +567,49 @@ def generate_trade_decision(
     else:
         final_signal = "HOLD"
 
+    safety_guard: dict[str, Any] = {
+        "triggered": False,
+        "reason": "",
+    }
+    regime = str(market_regime.get("regime", "disabled"))
+    ml_signal = signal
+    llm_signal = str(llm_overlay.get("llm_signal", "HOLD")).upper()
+    llm_confidence = clamp(float(llm_overlay.get("confidence", 0.0) or 0.0), 0.0, 1.0)
+    llm_ok = llm_overlay.get("status") == "ok"
+
+    if market_regime.get("enabled") and regime == "extreme" and EXTREME_REGIME_FORCE_HOLD:
+        final_signal = "HOLD"
+        safety_guard = {
+            "triggered": True,
+            "reason": "Extreme volatility regime: forced HOLD.",
+        }
+    elif market_regime.get("enabled") and regime == "high" and HIGH_REGIME_REQUIRE_LLM_CONFIRMATION:
+        if not llm_ok or llm_confidence < clamp(HIGH_REGIME_MIN_LLM_CONFIDENCE, 0.0, 1.0):
+            final_signal = "HOLD"
+            safety_guard = {
+                "triggered": True,
+                "reason": "High volatility regime: LLM confirmation unavailable or confidence too low.",
+            }
+        elif ml_signal in {"BUY", "SELL"} and llm_signal not in {ml_signal, "HOLD"}:
+            final_signal = "HOLD"
+            safety_guard = {
+                "triggered": True,
+                "reason": "High volatility regime: ML and LLM disagree, forced HOLD.",
+            }
+
     return {
         "signal": final_signal,
         "probability_up": final_probability_up,
         "buy_threshold": effective_buy_threshold,
         "sell_threshold": effective_sell_threshold,
         "threshold_context": threshold_context,
-        "decision_engine": "ml_llm_merged" if LLM_MERGE_ENABLED else "ml_primary",
+        "decision_engine": "ml_regime_hybrid" if VOLATILITY_REGIME_ENABLED else ("ml_llm_merged" if LLM_MERGE_ENABLED else "ml_primary"),
+        "market_regime": market_regime,
         "ml_signal": signal,
         "ml_probability_up": probability,
         "llm_overlay": llm_overlay,
         "llm_merge": merge_result,
+        "safety_guard": safety_guard,
         "latest_timestamp": str(full_row.get("timestamp", "")),
     }
 

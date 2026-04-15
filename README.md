@@ -180,6 +180,7 @@ Workflow behavior:
 
 - deploy workflow runs automatically on pushes to `main`
 - training workflow runs manually from GitHub Actions with `workflow_dispatch`
+- training workflow now runs `research/build_datasets.py` before `research/train_combined_model.py`
 
 This lets you push from the Mac and have the Windows machine rebuild or train remotely without sitting near the desktop.
 
