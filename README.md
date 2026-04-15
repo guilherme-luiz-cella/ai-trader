@@ -85,3 +85,7 @@ While historical performance can provide confidence in a strategy, past results 
 - ccxt - if you want to connect to other exchanges other than hyperliquid
 
 Note for Streamlit Cloud deployment: TA-Lib is intentionally not in `requirements.txt` because wheels/builds are often unavailable on cloud Python images. The deployed dashboard does not require TA-Lib.
+
+Note for Streamlit Cloud deployment: `pandas-ta` is also intentionally not in `requirements.txt` because it pulls `numba/llvmlite`, which currently fails on Streamlit Cloud Python 3.14 images. Use `pandas-ta` only in local research/implementation environments.
+
+You can lock the deployment Python version with `runtime.txt` (currently `python-3.13`). If you want a different version, edit that single line and redeploy.

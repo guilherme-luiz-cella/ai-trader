@@ -4,7 +4,6 @@ colorama
 joblib
 numpy
 pandas
-pandas-ta
 python-dotenv
 pytz
 requests
