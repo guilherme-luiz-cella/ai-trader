@@ -15,26 +15,47 @@ import os
 import re
 import sys
 import time
+import math
+import hmac
+import json
 from pathlib import Path
 from typing import Any, Optional, Tuple
 
 import pandas as pd
+import requests
 import streamlit as st
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parent
 sys.path.insert(0, str(BASE_DIR))
-load_dotenv(PROJECT_ROOT / ".env")
+load_dotenv(PROJECT_ROOT / ".env", override=True)
 
-from generate_trade_signal import load_latest_row, latest_file_with_suffix, load_model  # noqa: E402
+from generate_trade_signal import (  # noqa: E402
+    ADAPTIVE_THRESHOLD_ENABLED,
+    LLM_API_KEY,
+    LLM_BASE_URL,
+    LLM_BYPASS_ENV_PROXY,
+    LLM_ENABLED,
+    LLM_MODEL,
+    LLM_PROVIDER,
+    LLM_TIMEOUT_SECONDS,
+    generate_trade_decision,
+    load_latest_row,
+    latest_file_with_suffix,
+)
 
 ARTIFACTS_DIR = BASE_DIR / "artifacts"
 DATA_DIR = BASE_DIR / "data_sets"
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
 BINANCE_TESTNET = os.getenv("BINANCE_TESTNET", "false").lower() == "true"
+BINANCE_BYPASS_ENV_PROXY = os.getenv("BINANCE_BYPASS_ENV_PROXY", "true").lower() == "true"
+BINANCE_TIMEOUT_SECONDS = int(os.getenv("BINANCE_TIMEOUT_SECONDS", "30"))
 CHECK_SYMBOL = os.getenv("CHECK_SYMBOL", "BTC/USDT")
+ACCOUNT_REFERENCE_USD = float(os.getenv("ACCOUNT_REFERENCE_USD", "6.93"))
+AUTH_USERNAME = os.getenv("AUTH_USERNAME", "Guilherme123")
+AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "Password123@")
 
 st.set_page_config(page_title="Trading Plan Dashboard", page_icon="📈", layout="wide")
 
@@ -186,6 +207,42 @@ st.markdown(
 )
 
 
+def _auth_ok(input_username: str, input_password: str) -> bool:
+    username_match = hmac.compare_digest((input_username or "").strip(), AUTH_USERNAME)
+    password_match = hmac.compare_digest(input_password or "", AUTH_PASSWORD)
+    return username_match and password_match
+
+
+def require_login() -> None:
+    if st.session_state.get("auth_ok", False):
+        with st.sidebar:
+            st.caption(f"Authenticated as {AUTH_USERNAME}")
+            if st.button("Logout", use_container_width=True):
+                st.session_state["auth_ok"] = False
+                st.rerun()
+        return
+
+    st.title("Secure Login")
+    st.caption("Please sign in to access the trading dashboard.")
+    with st.form("login_form", clear_on_submit=False):
+        username = st.text_input("Username", value="")
+        password = st.text_input("Password", value="", type="password")
+        submitted = st.form_submit_button("Login", use_container_width=True)
+
+    if submitted:
+        if _auth_ok(username, password):
+            st.session_state["auth_ok"] = True
+            st.success("Login successful.")
+            st.rerun()
+        else:
+            st.error("Invalid username or password.")
+
+    st.stop()
+
+
+require_login()
+
+
 def normalize_symbol(symbol: str) -> str:
     symbol = (symbol or "").strip().upper()
     if not symbol:
@@ -199,6 +256,29 @@ def split_symbol_assets(symbol: str) -> tuple[str, str]:
     symbol = normalize_symbol(symbol)
     base, quote = symbol.split("/", 1)
     return base, quote
+
+
+def to_binance_market_id(symbol: str) -> str:
+    return normalize_symbol(symbol).replace("/", "")
+
+
+def from_binance_market_id(symbol_id: str, quote_asset: str) -> str:
+    quote = (quote_asset or "USDT").upper()
+    if symbol_id.endswith(quote) and len(symbol_id) > len(quote):
+        base = symbol_id[: -len(quote)]
+        return f"{base}/{quote}"
+    return symbol_id
+
+
+def binance_public_json(path: str, params: dict[str, Any] | None = None) -> Any:
+    base = "https://testnet.binance.vision" if BINANCE_TESTNET else "https://api.binance.com"
+    url = f"{base}{path}"
+    with requests.Session() as session:
+        if BINANCE_BYPASS_ENV_PROXY:
+            session.trust_env = False
+        response = session.get(url, params=params or {}, timeout=BINANCE_TIMEOUT_SECONDS)
+        response.raise_for_status()
+        return response.json()
 
 
 def get_binance_client():
@@ -215,17 +295,69 @@ def get_binance_client():
             "apiKey": BINANCE_API_KEY,
             "secret": BINANCE_API_SECRET,
             "enableRateLimit": True,
+            "options": {
+                # Avoid private capital endpoint fetch during market bootstrap.
+                # Some keys/accounts block this endpoint and it breaks all downstream calls.
+                "fetchCurrencies": False,
+            },
         }
     )
+    exchange.timeout = BINANCE_TIMEOUT_SECONDS * 1000
+    if BINANCE_BYPASS_ENV_PROXY:
+        session = getattr(exchange, "session", None)
+        if session is not None:
+            session.trust_env = False
     exchange.set_sandbox_mode(BINANCE_TESTNET)
     return exchange
+
+
+def format_binance_error(exc: Exception, action: str) -> str:
+    raw = str(exc)
+    lower = raw.lower()
+    hints = []
+    if "exchangeinfo" in lower or "market metadata" in lower:
+        hints.append("Binance market metadata request failed (exchangeInfo).")
+        hints.append("This is usually IP whitelist, region/network, or temporary Binance connectivity restriction.")
+    if "451" in lower or "restricted" in lower or "location" in lower:
+        hints.append("Your region or endpoint may be restricted for this account/network.")
+    if "invalid api-key" in lower or "signature" in lower or "-2015" in lower:
+        hints.append("Check BINANCE_API_KEY/BINANCE_API_SECRET and account API permissions.")
+    if "timeout" in lower or "network" in lower or "econn" in lower:
+        hints.append("Network timeout/connectivity issue. Retry in a few seconds.")
+    if "proxy" in lower:
+        hints.append("Proxy tunnel appears to block Binance API. Set BINANCE_BYPASS_ENV_PROXY=true.")
+
+    hints.append("If using Binance key restrictions, add your current public IP to API whitelist or disable whitelist for testing.")
+    hints.append("If issue persists, test with BINANCE_TESTNET=true to validate local connectivity and app flow.")
+    hint_text = " ".join(hints)
+    return f"Binance {action} failed: {raw}. {hint_text}" if hint_text else f"Binance {action} failed: {raw}"
 
 
 def get_ticker_with_metrics(symbol: str) -> tuple[dict[str, Any], dict[str, float]]:
     exchange = get_binance_client()
     norm_symbol = normalize_symbol(symbol)
     start = time.monotonic()
-    ticker = exchange.fetch_ticker(norm_symbol)
+    try:
+        ticker = exchange.fetch_ticker(norm_symbol)
+    except Exception as exc:
+        # Fallback that does not require exchangeInfo metadata.
+        try:
+            market_id = to_binance_market_id(norm_symbol)
+            book = binance_public_json("/api/v3/ticker/bookTicker", {"symbol": market_id})
+            price_data = binance_public_json("/api/v3/ticker/price", {"symbol": market_id})
+            now_ms = int(pd.Timestamp.now("UTC").timestamp() * 1000)
+            ticker = {
+                "symbol": norm_symbol,
+                "bid": float(book.get("bidPrice") or 0.0),
+                "ask": float(book.get("askPrice") or 0.0),
+                "last": float(price_data.get("price") or 0.0),
+                "timestamp": now_ms,
+            }
+        except Exception as fallback_exc:
+            raise RuntimeError(
+                format_binance_error(exc, "ticker fetch")
+                + f" Fallback public ticker path failed: {fallback_exc}"
+            ) from fallback_exc
     api_latency_ms = (time.monotonic() - start) * 1000
 
     now_ms = int(pd.Timestamp.now("UTC").timestamp() * 1000)
@@ -293,8 +425,14 @@ def get_account_snapshot(symbol: str) -> dict[str, Any]:
     ask = float(ticker.get("ask") or ticker.get("last") or 0)
     mark = float(ticker.get("last") or ((bid + ask) / 2 if bid and ask else 0))
 
-    balance = exchange.fetch_balance()
-    open_orders = exchange.fetch_open_orders(norm_symbol)
+    try:
+        balance = exchange.fetch_balance()
+        try:
+            open_orders = exchange.fetch_open_orders(norm_symbol)
+        except Exception:
+            open_orders = []
+    except Exception as exc:
+        raise RuntimeError(format_binance_error(exc, "account snapshot")) from exc
 
     base_total = float(balance.get("total", {}).get(base, 0) or 0)
     quote_total = float(balance.get("total", {}).get(quote, 0) or 0)
@@ -334,7 +472,10 @@ def get_account_snapshot(symbol: str) -> dict[str, Any]:
 def get_market_requirements(symbol: str) -> dict[str, float]:
     exchange = get_binance_client()
     norm_symbol = normalize_symbol(symbol)
-    exchange.load_markets()
+    try:
+        exchange.load_markets()
+    except Exception as exc:
+        raise RuntimeError(format_binance_error(exc, "market metadata")) from exc
     market = exchange.market(norm_symbol)
 
     min_qty = float((market.get("limits", {}).get("amount", {}).get("min") or 0) or 0)
@@ -378,9 +519,32 @@ def validate_order_minimums(
     return True, "Minimum checks passed."
 
 
+def wallet_permission_hint(error: Exception | str) -> str:
+    raw = str(error)
+    lowered = raw.lower()
+    if "/api/v3/exchangeinfo" in lowered or "api/v3/exchangeinfo" in lowered:
+        return (
+            "Binance market metadata request failed (exchangeInfo). "
+            "This is usually IP whitelist, region/network, or temporary Binance connectivity restriction."
+        )
+    if "/sapi/v1/capital/config/getall" in lowered or "capital/config/getall" in lowered:
+        return (
+            "Binance wallet permission missing for this API key. "
+            "Enable API Read permissions (and allow SAPI wallet endpoints) in Binance API Management."
+        )
+    if "permission" in lowered or "forbidden" in lowered:
+        return (
+            "Binance denied this wallet request. Check API key permissions and IP whitelist in Binance API Management."
+        )
+    return raw
+
+
 def get_wallet_snapshot() -> dict[str, Any]:
     exchange = get_binance_client()
-    balance = exchange.fetch_balance()
+    try:
+        balance = exchange.fetch_balance()
+    except Exception as exc:
+        raise RuntimeError(format_binance_error(exc, "wallet snapshot")) from exc
     totals = balance.get("total", {})
     free_map = balance.get("free", {})
     used_map = balance.get("used", {})
@@ -388,7 +552,12 @@ def get_wallet_snapshot() -> dict[str, Any]:
     non_zero_assets = [asset for asset, total in totals.items() if float(total or 0) > 0]
 
     # Load markets once so we can estimate values in USDT where pairs exist.
-    exchange.load_markets()
+    markets_loaded = True
+    try:
+        exchange.load_markets()
+    except Exception as exc:
+        markets_loaded = False
+        st.caption(f"Wallet valuation fallback mode: {format_binance_error(exc, 'wallet market metadata')}")
 
     rows: list[dict[str, Any]] = []
     total_estimated_usdt = 0.0
@@ -402,7 +571,7 @@ def get_wallet_snapshot() -> dict[str, Any]:
             est_usdt = total
         else:
             pair = f"{asset}/USDT"
-            if pair in exchange.markets:
+            if markets_loaded and pair in exchange.markets:
                 try:
                     t = exchange.fetch_ticker(pair)
                     px = float(t.get("last") or 0)
@@ -439,8 +608,50 @@ def build_market_scan(
     quote_asset: str,
 ) -> pd.DataFrame:
     exchange = get_binance_client()
-    exchange.load_markets()
     quote_asset = (quote_asset or "USDT").strip().upper()
+    try:
+        exchange.load_markets()
+    except Exception as exc:
+        # Fallback to public 24hr endpoint, which avoids exchangeInfo dependency.
+        try:
+            tickers_24h = binance_public_json("/api/v3/ticker/24hr")
+            if not isinstance(tickers_24h, list):
+                return pd.DataFrame()
+
+            rows = []
+            for t in tickers_24h:
+                symbol_id = str(t.get("symbol", "")).upper()
+                if not symbol_id.endswith(quote_asset):
+                    continue
+                last = float(t.get("lastPrice") or 0.0)
+                bid = float(t.get("bidPrice") or last or 0.0)
+                ask = float(t.get("askPrice") or last or 0.0)
+                pct = float(t.get("priceChangePercent") or 0.0)
+                qv = float(t.get("quoteVolume") or 0.0)
+                spread_bps = ((ask - bid) / last * 10000) if last > 0 and ask >= bid else 0.0
+                ai_score = (abs(pct) * 1.2) + (min(qv / 1_000_000, 100.0) * 0.15) - (spread_bps * 0.05)
+                ai_bias = "BUY" if pct >= 0 else "SELL"
+                rows.append(
+                    {
+                        "symbol": from_binance_market_id(symbol_id, quote_asset),
+                        "last": last,
+                        "change_pct": pct,
+                        "quote_volume": qv,
+                        "spread_bps": spread_bps,
+                        "ai_bias": ai_bias,
+                        "ai_score": ai_score,
+                    }
+                )
+
+            if not rows:
+                return pd.DataFrame()
+            scan_df = pd.DataFrame(rows).sort_values("ai_score", ascending=False).reset_index(drop=True)
+            return scan_df.head(max(1, int(max_symbols)))
+        except Exception as fallback_exc:
+            raise RuntimeError(
+                format_binance_error(exc, "market scan metadata")
+                + f" Fallback public scan path failed: {fallback_exc}"
+            ) from fallback_exc
 
     universe = [
         symbol
@@ -765,19 +976,6 @@ def resolve_dataset_path() -> Path:
     return latest_dataset
 
 
-def compute_signal(model_path: Path, dataset_path: Path, buy_threshold: float, sell_threshold: float) -> Tuple[str, float, pd.Series, pd.DataFrame]:
-    model = load_model(model_path)
-    features, full_row = load_latest_row(dataset_path)
-    probability = float(model.predict_proba(features)[0][1])
-    if probability >= buy_threshold:
-        signal = "BUY"
-    elif probability <= sell_threshold:
-        signal = "SELL"
-    else:
-        signal = "HOLD"
-    return signal, probability, full_row, features
-
-
 def risk_plan(deposit_amount: float, active_capital_pct: float, reserve_pct: float, max_trade_pct: float, stop_loss_pct: float, take_profit_pct: float, max_daily_loss_pct: float, max_drawdown_pct: float, withdrawal_target_pct: float) -> dict:
     active_capital = deposit_amount * active_capital_pct
     reserve_cash = deposit_amount * reserve_pct
@@ -803,13 +1001,176 @@ def format_currency(value: float) -> str:
     return f"${value:,.2f}"
 
 
+def clamp_value(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def estimate_cycles_to_goal(
+    current_value: float,
+    goal_value: float,
+    signal: str,
+    probability_up: float,
+    order_size: float,
+    market_price: float,
+    take_profit_pct: float,
+    stop_loss_pct: float,
+    fee_drag_pct: float,
+) -> dict[str, Any]:
+    goal_profit = max(0.0, goal_value - current_value)
+    if goal_profit <= 0:
+        return {
+            "status": "goal_already_reached",
+            "goal_profit": 0.0,
+            "expected_profit_per_cycle": 0.0,
+            "expected_return_per_cycle": 0.0,
+            "recommended_cycles": 0,
+            "win_probability": 0.5,
+        }
+
+    notional = max(0.0, order_size * market_price)
+    if notional <= 0:
+        return {
+            "status": "invalid_order_notional",
+            "goal_profit": goal_profit,
+            "expected_profit_per_cycle": 0.0,
+            "expected_return_per_cycle": 0.0,
+            "recommended_cycles": 0,
+            "win_probability": 0.5,
+        }
+
+    prob_up = clamp_value(float(probability_up), 0.0, 1.0)
+    if str(signal).upper() == "BUY":
+        win_probability = prob_up
+    elif str(signal).upper() == "SELL":
+        win_probability = 1.0 - prob_up
+    else:
+        # HOLD is uncertainty; use conservative 50/50 assumption.
+        win_probability = 0.5
+
+    expected_return = (win_probability * take_profit_pct) - ((1.0 - win_probability) * stop_loss_pct) - fee_drag_pct
+    expected_profit_per_cycle = notional * expected_return
+    if expected_profit_per_cycle <= 0:
+        return {
+            "status": "non_positive_expectancy",
+            "goal_profit": goal_profit,
+            "expected_profit_per_cycle": expected_profit_per_cycle,
+            "expected_return_per_cycle": expected_return,
+            "recommended_cycles": 0,
+            "win_probability": win_probability,
+        }
+
+    recommended_cycles = int(math.ceil(goal_profit / expected_profit_per_cycle))
+    return {
+        "status": "ok",
+        "goal_profit": goal_profit,
+        "expected_profit_per_cycle": expected_profit_per_cycle,
+        "expected_return_per_cycle": expected_return,
+        "recommended_cycles": max(1, min(recommended_cycles, 1000)),
+        "win_probability": win_probability,
+    }
+
+
+def llm_support_chat(message: str, context: dict[str, Any]) -> dict[str, Any]:
+    if not LLM_ENABLED:
+        return {
+            "status": "disabled",
+            "answer": "LLM is disabled. Enable LLM_ENABLED=true in environment.",
+        }
+    if not LLM_API_KEY:
+        return {
+            "status": "missing_api_key",
+            "answer": "LLM_API_KEY is missing.",
+        }
+
+    if LLM_PROVIDER in {"deepseek", "openai_compatible"}:
+        endpoint = f"{LLM_BASE_URL.rstrip('/')}/chat/completions"
+    elif LLM_PROVIDER == "huggingface_inference":
+        endpoint = f"{LLM_BASE_URL.rstrip('/')}/models/{LLM_MODEL}"
+    else:
+        return {
+            "status": "unsupported_provider",
+            "answer": f"Unsupported LLM provider: {LLM_PROVIDER}",
+        }
+
+    system_prompt = (
+        "You are a trading support assistant for a live dashboard. "
+        "Be concise, practical, and risk-aware. "
+        "Explain whether ML and LLM are merged using provided context and suggest safe next actions."
+    )
+    user_prompt = (
+        f"User question: {message}\n"
+        f"Current engine context: {json.dumps(context, ensure_ascii=True)}"
+    )
+
+    headers = {
+        "Authorization": f"Bearer {LLM_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        if LLM_PROVIDER == "huggingface_inference":
+            payload: dict[str, Any] = {
+                "inputs": f"{system_prompt}\n{user_prompt}",
+                "parameters": {
+                    "max_new_tokens": 350,
+                    "temperature": 0.2,
+                    "return_full_text": False,
+                },
+            }
+        else:
+            payload = {
+                "model": LLM_MODEL,
+                "temperature": 0.2,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            }
+
+        with requests.Session() as session:
+            if LLM_BYPASS_ENV_PROXY:
+                session.trust_env = False
+            response = session.post(endpoint, headers=headers, json=payload, timeout=LLM_TIMEOUT_SECONDS)
+            response.raise_for_status()
+            data = response.json()
+
+        if LLM_PROVIDER == "huggingface_inference":
+            if isinstance(data, list) and data:
+                answer = str(data[0].get("generated_text", ""))
+            elif isinstance(data, dict):
+                answer = str(data.get("generated_text", ""))
+            else:
+                answer = str(data)
+        else:
+            answer = str(data.get("choices", [{}])[0].get("message", {}).get("content", ""))
+
+        if not answer.strip():
+            answer = "No response content from LLM."
+
+        return {
+            "status": "ok",
+            "answer": answer,
+            "endpoint": endpoint,
+            "provider": LLM_PROVIDER,
+            "model": LLM_MODEL,
+        }
+    except Exception as exc:
+        return {
+            "status": "error",
+            "answer": f"LLM support chat error: {exc}",
+            "endpoint": endpoint,
+            "provider": LLM_PROVIDER,
+            "model": LLM_MODEL,
+        }
+
+
 for key, default in {
     "buy_threshold": 0.55,
     "sell_threshold": 0.45,
-    "deposit_amount": 1000.0,
-    "active_capital_pct": 0.70,
+    "deposit_amount": ACCOUNT_REFERENCE_USD,
+    "active_capital_pct": 0.50 if ACCOUNT_REFERENCE_USD <= 10 else 0.70,
     "reserve_pct": 0.30,
-    "max_trade_pct": 0.10,
+    "max_trade_pct": 0.20 if ACCOUNT_REFERENCE_USD <= 10 else 0.10,
     "stop_loss_pct": 0.03,
     "take_profit_pct": 0.05,
     "max_daily_loss_pct": 0.05,
@@ -818,6 +1179,9 @@ for key, default in {
     "live_symbol": CHECK_SYMBOL,
     "autopilot_interval_seconds": 15,
     "autopilot_cycles": 5,
+    "autopilot_auto_cycles_enabled": True,
+    "autopilot_goal_value": ACCOUNT_REFERENCE_USD * 1.25,
+    "autopilot_fee_drag_pct": 0.003,
     "autopilot_order_size": 0.001,
     "autopilot_live_enabled": False,
     "autopilot_confirmation": "",
@@ -832,6 +1196,7 @@ for key, default in {
     "market_scan_quote_asset": "USDT",
     "market_scan_interval_seconds": 30,
     "market_scan_auto_pick_symbol": True,
+    "adaptive_threshold_enabled": ADAPTIVE_THRESHOLD_ENABLED,
 }.items():
     st.session_state.setdefault(key, default)
 
@@ -852,6 +1217,7 @@ except ModuleNotFoundError:
 
 with st.sidebar:
     st.header("Model Inputs")
+    st.caption(f"Runtime python: {sys.executable}")
     model_path = resolve_latest_model()
     dataset_path = resolve_dataset_path()
 
@@ -859,6 +1225,11 @@ with st.sidebar:
 
     buy_threshold = st.slider("Buy threshold", 0.50, 0.90, step=0.01, key="buy_threshold")
     sell_threshold = st.slider("Sell threshold", 0.10, 0.50, step=0.01, key="sell_threshold")
+    adaptive_threshold_enabled = st.checkbox(
+        "Adaptive thresholds",
+        key="adaptive_threshold_enabled",
+        help="Automatically adjust buy/sell thresholds based on recent market volatility.",
+    )
 
     st.divider()
     st.header("Delay Safeguards")
@@ -903,8 +1274,8 @@ with st.sidebar:
 
     st.divider()
     st.header("Capital Planning")
-    deposit_amount = st.number_input("Deposit amount", min_value=0.0, step=100.0, key="deposit_amount")
-    active_capital_pct = st.slider("Capital deployed into trading", 0.10, 1.00, step=0.05, key="active_capital_pct")
+    deposit_amount = st.number_input("Deposit amount", min_value=0.0, step=1.0, key="deposit_amount")
+    active_capital_pct = st.slider("Capital deployed into trading", 0.001, 1.000, step=0.001, key="active_capital_pct")
     reserve_pct = st.slider("Cash reserve", 0.00, 0.90, step=0.05, key="reserve_pct")
     max_trade_pct = st.slider("Max size per trade", 0.01, 0.50, step=0.01, key="max_trade_pct")
     stop_loss_pct = st.slider("Stop loss per trade", 0.01, 0.20, step=0.01, key="stop_loss_pct")
@@ -913,9 +1284,27 @@ with st.sidebar:
     max_drawdown_pct = st.slider("Max drawdown", 0.05, 0.50, step=0.01, key="max_drawdown_pct")
     withdrawal_target_pct = st.slider("Withdraw when account grows by", 0.05, 1.00, step=0.05, key="withdrawal_target_pct")
 
-signal, probability_up, latest_row, feature_row = compute_signal(model_path, dataset_path, buy_threshold, sell_threshold)
+decision = generate_trade_decision(
+    model_path=model_path,
+    dataset_path=dataset_path,
+    base_buy_threshold=buy_threshold,
+    base_sell_threshold=sell_threshold,
+    adaptive_threshold_enabled=adaptive_threshold_enabled,
+)
+signal = str(decision.get("signal", "HOLD"))
+probability_up = float(decision.get("probability_up", 0.5))
+effective_buy_threshold = float(decision.get("buy_threshold", buy_threshold))
+effective_sell_threshold = float(decision.get("sell_threshold", sell_threshold))
+ml_probability_up = float(decision.get("ml_probability_up", probability_up))
+decision_engine = str(decision.get("decision_engine", "ml_primary"))
+llm_overlay = decision.get("llm_overlay", {})
+llm_merge = decision.get("llm_merge", {})
+
+feature_row, latest_row = load_latest_row(dataset_path)
 st.session_state["signal"] = signal
 st.session_state["probability_up"] = probability_up
+st.session_state["ml_probability_up"] = ml_probability_up
+st.session_state["decision_engine"] = decision_engine
 st.session_state["latest_price_fallback"] = latest_row.get("close", None)
 plan = risk_plan(
     deposit_amount=deposit_amount,
@@ -931,17 +1320,15 @@ plan = risk_plan(
 
 wallet_total_usdt: float | None = None
 wallet_error: str | None = None
-try:
-    wallet_snapshot_head = get_wallet_snapshot()
+# Avoid hard-failing page load on Binance network/permission issues.
+wallet_snapshot_head = st.session_state.get("wallet_snapshot")
+if isinstance(wallet_snapshot_head, dict):
     wallet_total_usdt = float(wallet_snapshot_head.get("estimated_total_usdt", 0.0) or 0.0)
-except Exception as exc:
-    wallet_error = str(exc)
 
 primary_snapshot: dict[str, Any] | None = None
-try:
-    primary_snapshot = get_account_snapshot(st.session_state.get("live_symbol", CHECK_SYMBOL))
-except Exception:
-    primary_snapshot = None
+cached_primary_snapshot = st.session_state.get("primary_snapshot")
+if isinstance(cached_primary_snapshot, dict):
+    primary_snapshot = cached_primary_snapshot
 
 col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("Signal", signal)
@@ -960,7 +1347,13 @@ else:
 strip_parts = [
     f"<span class='status-pill {signal_pill_class}'>{signal}</span>",
     f"<span><strong>AI Up Prob:</strong> {probability_up:.1%}</span>",
+    f"<span style='margin-left:12px;'><strong>Buy/Sell:</strong> {effective_buy_threshold:.2f} / {effective_sell_threshold:.2f}</span>",
+    f"<span style='margin-left:12px;'><strong>Engine:</strong> {decision_engine}</span>",
 ]
+
+llm_overlay_status = str(llm_overlay.get("status", "disabled"))
+if llm_overlay_status != "disabled":
+    strip_parts.append(f"<span style='margin-left:12px;'><strong>LLM:</strong> {llm_overlay_status}</span>")
 
 if primary_snapshot:
     strip_parts.extend(
@@ -974,8 +1367,30 @@ if primary_snapshot:
 
 st.markdown(f"<div class='market-strip'>{' '.join(strip_parts)}</div>", unsafe_allow_html=True)
 
+llm_overlay_message = str(llm_overlay.get("message", "") or "")
+llm_display_status = llm_overlay_status
+if llm_overlay_status == "ok":
+    st.success("LLM status: ready and responding.")
+elif llm_overlay_status in {"missing_api_key", "disabled"}:
+    st.warning("LLM status: disabled or missing API key.")
+elif "loading" in llm_overlay_message.lower():
+    llm_display_status = "warming_up"
+    st.info("LLM status: model is warming up on provider side.")
+elif "429" in llm_overlay_message or "rate limit" in llm_overlay_message.lower():
+    llm_display_status = "rate_limited"
+    st.warning("LLM status: provider rate-limited. Using ML-only fallback.")
+elif llm_overlay_status == "error":
+    st.error(f"LLM status: error. {llm_overlay_message}")
+else:
+    st.info(f"LLM status: {llm_overlay_status}.")
+
 if wallet_error:
     st.caption(f"Wallet estimation unavailable: {wallet_error}")
+if wallet_error and "exchangeinfo" in wallet_error.lower():
+    st.info(
+        "Binance `exchangeInfo` is market metadata (trading rules, symbol filters, precision). "
+        "When this endpoint is blocked, wallet and ticket checks cannot initialize."
+    )
 
 st.subheader("Current Decision")
 if signal == "BUY":
@@ -1034,8 +1449,14 @@ st.write(
         "model_path": str(model_path),
         "dataset_path": str(dataset_path),
         "latest_timestamp": str(latest_row.get("timestamp", "")),
-        "buy_threshold": buy_threshold,
-        "sell_threshold": sell_threshold,
+        "base_buy_threshold": buy_threshold,
+        "base_sell_threshold": sell_threshold,
+        "effective_buy_threshold": effective_buy_threshold,
+        "effective_sell_threshold": effective_sell_threshold,
+        "decision_engine": decision_engine,
+        "ml_probability_up": ml_probability_up,
+        "llm_overlay_status": llm_display_status,
+        "llm_merge_status": llm_merge.get("status", "disabled"),
     }
 )
 
@@ -1060,7 +1481,7 @@ if auto_refresh_enabled:
                 f"Live API refreshed at {live_refresh_status['timestamp']} for {live_refresh_status['symbol']}"
             )
     except Exception as refresh_exc:
-        st.caption(f"Live refresh error: {refresh_exc}")
+        st.caption(f"Live refresh error: {wallet_permission_hint(refresh_exc)}")
 
 market_scan_df = None
 if market_scan_enabled:
@@ -1072,7 +1493,7 @@ if market_scan_enabled:
             min_interval_seconds=int(market_scan_interval_seconds),
         )
     except Exception as scan_exc:
-        st.caption(f"Market scan error: {scan_exc}")
+        st.caption(f"Market scan error: {wallet_permission_hint(scan_exc)}")
 
 if market_scan_auto_pick_symbol and isinstance(market_scan_df, pd.DataFrame) and not market_scan_df.empty:
     st.session_state["live_symbol"] = str(market_scan_df.iloc[0]["symbol"])
@@ -1093,7 +1514,7 @@ with live_tab:
     with live_col2:
         autopilot_interval_seconds = st.number_input("Autopilot interval (seconds)", min_value=5, max_value=300, key="autopilot_interval_seconds")
     with live_col3:
-        autopilot_cycles = st.number_input("Run alone cycles", min_value=1, max_value=100, key="autopilot_cycles")
+        autopilot_cycles = st.number_input("Run alone cycles", min_value=1, max_value=1000, key="autopilot_cycles")
 
     if st.button("Capture Live Point"):
         try:
@@ -1103,7 +1524,7 @@ with live_tab:
             point = append_live_history(capture_symbol, signal, probability_up)
             st.success(f"Captured: bid={point['best_bid']}, ask={point['best_ask']}, signal={point['signal']}")
         except Exception as exc:
-            st.error(str(exc))
+            st.error(wallet_permission_hint(exc))
 
     history = st.session_state.get("live_history", [])
     if history:
@@ -1119,14 +1540,58 @@ with live_tab:
     st.subheader("Run Alone (Autopilot)")
     st.write("Runs AI trading logic for multiple cycles without manual clicks.")
     autopilot_order_size = st.number_input("Autopilot order size", min_value=0.0, step=0.001, format="%.6f", key="autopilot_order_size")
+    autopilot_auto_cycles_enabled = st.checkbox("AI decides cycle count from goal", key="autopilot_auto_cycles_enabled")
+    autopilot_goal_value = st.number_input("Goal account value", min_value=0.0, step=1.0, key="autopilot_goal_value")
+    autopilot_fee_drag_pct = st.number_input("Estimated fee/slippage per cycle", min_value=0.0, max_value=0.05, step=0.0005, format="%.4f", key="autopilot_fee_drag_pct")
     autopilot_live_enabled = st.checkbox("Allow live orders in autopilot", key="autopilot_live_enabled")
     autopilot_confirmation = st.text_input("Type AUTO to allow live autopilot trades", key="autopilot_confirmation")
 
+    try:
+        autopilot_price = float(get_market_price(live_symbol))
+    except Exception:
+        autopilot_price = float(st.session_state.get("latest_price_fallback") or 0.0)
+
+    current_value_for_goal = float(wallet_total_usdt or plan["deposit_amount"])
+    cycle_plan = estimate_cycles_to_goal(
+        current_value=current_value_for_goal,
+        goal_value=float(autopilot_goal_value),
+        signal=st.session_state.get("signal", signal),
+        probability_up=float(st.session_state.get("probability_up", probability_up)),
+        order_size=float(autopilot_order_size),
+        market_price=autopilot_price,
+        take_profit_pct=float(plan["take_profit_pct"]),
+        stop_loss_pct=float(plan["stop_loss_pct"]),
+        fee_drag_pct=float(autopilot_fee_drag_pct),
+    )
+
+    st.caption(
+        "AI cycle planner: "
+        f"status={cycle_plan['status']} | "
+        f"goal_profit={format_currency(float(cycle_plan['goal_profit']))} | "
+        f"expected_profit/cycle={format_currency(float(cycle_plan['expected_profit_per_cycle']))} | "
+        f"win_prob={float(cycle_plan['win_probability']):.1%} | "
+        f"recommended_cycles={int(cycle_plan['recommended_cycles'])}"
+    )
+
     if st.button("Start Run Alone"):
+        effective_cycles = int(autopilot_cycles)
+        if autopilot_auto_cycles_enabled:
+            if cycle_plan["status"] == "ok":
+                effective_cycles = int(cycle_plan["recommended_cycles"])
+            elif cycle_plan["status"] == "goal_already_reached":
+                st.success("Goal already reached. No additional cycles are required.")
+                effective_cycles = 0
+            else:
+                st.warning("AI could not compute a profitable cycle plan from current inputs. Using manual cycle count.")
+
+        if effective_cycles <= 0:
+            st.info("Autopilot did not run because required cycles is zero.")
+            st.stop()
+
         progress = st.progress(0)
         status_box = st.empty()
         logs = []
-        for cycle in range(int(autopilot_cycles)):
+        for cycle in range(int(effective_cycles)):
             try:
                 point = append_live_history(
                     live_symbol,
@@ -1146,6 +1611,7 @@ with live_tab:
                 )
                 logs.append({
                     "cycle": cycle + 1,
+                    "target_cycles": int(effective_cycles),
                     "timestamp": point["timestamp"],
                     "signal": point["signal"],
                     "bid": point["best_bid"],
@@ -1157,12 +1623,13 @@ with live_tab:
                     "spread_bps": trade_result.get("spread_bps"),
                     "guard": trade_result.get("guard_message"),
                 })
-                status_box.info(f"Cycle {cycle + 1}/{int(autopilot_cycles)} complete.")
+                status_box.info(f"Cycle {cycle + 1}/{int(effective_cycles)} complete.")
             except Exception as exc:
-                logs.append({"cycle": cycle + 1, "error": str(exc)})
-                status_box.error(f"Cycle {cycle + 1} failed: {exc}")
-            progress.progress((cycle + 1) / int(autopilot_cycles))
-            if cycle + 1 < int(autopilot_cycles):
+                friendly_err = wallet_permission_hint(exc)
+                logs.append({"cycle": cycle + 1, "error": friendly_err})
+                status_box.error(f"Cycle {cycle + 1} failed: {friendly_err}")
+            progress.progress((cycle + 1) / int(effective_cycles))
+            if cycle + 1 < int(effective_cycles):
                 time.sleep(int(autopilot_interval_seconds))
 
         st.success("Autopilot run completed.")
@@ -1179,15 +1646,21 @@ with wallet_tab:
     if st.button("Refresh My Wallet"):
         try:
             st.session_state["wallet_snapshot"] = get_wallet_snapshot()
+            st.session_state["wallet_error"] = ""
             st.success("Wallet updated.")
         except Exception as exc:
-            st.error(str(exc))
+            friendly = wallet_permission_hint(exc)
+            st.session_state["wallet_error"] = friendly
+            st.warning(friendly)
 
     if "wallet_snapshot" not in st.session_state:
         try:
             st.session_state["wallet_snapshot"] = get_wallet_snapshot()
+            st.session_state["wallet_error"] = ""
         except Exception as exc:
-            st.error(str(exc))
+            friendly = wallet_permission_hint(exc)
+            st.session_state["wallet_error"] = friendly
+            st.warning(friendly)
 
     wallet_snapshot = st.session_state.get("wallet_snapshot")
     if wallet_snapshot:
@@ -1215,9 +1688,10 @@ with account_tab:
         if st.button("Refresh Account Snapshot"):
             try:
                 snapshot = get_account_snapshot(snapshot_symbol)
+                st.session_state["primary_snapshot"] = snapshot
                 st.json(snapshot)
             except Exception as exc:
-                st.error(str(exc))
+                st.error(wallet_permission_hint(exc))
 
     with action_col:
         st.markdown("### Execute Action")
@@ -1251,7 +1725,7 @@ with account_tab:
             if not _preview_ok:
                 st.warning("Current input may be rejected by Binance minimum filters.")
         except Exception as preview_exc:
-            st.caption(f"Minimum check unavailable: {preview_exc}")
+            st.caption(f"Minimum check unavailable: {wallet_permission_hint(preview_exc)}")
 
         if run_action_submit:
             try:
@@ -1271,7 +1745,94 @@ with account_tab:
                     )
                     st.json(result)
             except Exception as exc:
-                st.error(str(exc))
+                st.error(wallet_permission_hint(exc))
+
+    st.markdown("### Trade Test Case (Pre-Live)")
+    st.caption("Runs a safe validation flow (minimum checks + dry-run execution) before enabling live orders.")
+    test_col1, test_col2, test_col3 = st.columns(3)
+    with test_col1:
+        test_symbol = st.text_input("Test symbol", value=CHECK_SYMBOL, key="trade_test_symbol")
+    with test_col2:
+        test_quote_amount = st.number_input("Test quote amount", min_value=0.0, value=10.0, step=1.0, key="trade_test_quote_amount")
+    with test_col3:
+        test_live_enabled = st.checkbox("Allow live test order", key="trade_test_live_enabled")
+    test_live_confirmation = st.text_input("Type LIVE_TEST to allow real test order", key="trade_test_live_confirmation")
+
+    if st.button("Run Trade Test Case", use_container_width=True):
+        test_logs: list[dict[str, Any]] = []
+        try:
+            px = float(get_market_price(test_symbol.strip()))
+            reqs = get_market_requirements(test_symbol.strip())
+            min_ok, min_msg = validate_order_minimums(
+                action="market_buy",
+                quantity=0.0,
+                quote_amount=float(test_quote_amount),
+                market_price=px,
+                min_qty=float(reqs["min_qty"]),
+                min_notional=float(reqs["min_notional"]),
+            )
+            test_logs.append({
+                "step": "minimum_check",
+                "status": "ok" if min_ok else "blocked",
+                "price": px,
+                "min_qty": reqs["min_qty"],
+                "min_notional": reqs["min_notional"],
+                "message": min_msg,
+            })
+
+            dry_run_result = execute_account_action(
+                action="market_buy",
+                symbol=test_symbol.strip(),
+                quantity=0.0,
+                quote_amount=float(test_quote_amount),
+                dry_run=True,
+                max_api_latency_ms=int(max_api_latency_ms),
+                max_ticker_age_ms=int(max_ticker_age_ms),
+                max_spread_bps=float(max_spread_bps),
+                min_trade_cooldown_seconds=int(min_trade_cooldown_seconds),
+            )
+            test_logs.append({
+                "step": "dry_run_order",
+                "status": dry_run_result.get("status"),
+                "message": dry_run_result.get("message", ""),
+                "guard": dry_run_result.get("guard_message", ""),
+            })
+
+            if test_live_enabled and test_live_confirmation.strip().upper() == "LIVE_TEST":
+                if min_ok:
+                    live_result = execute_account_action(
+                        action="market_buy",
+                        symbol=test_symbol.strip(),
+                        quantity=0.0,
+                        quote_amount=float(test_quote_amount),
+                        dry_run=False,
+                        max_api_latency_ms=int(max_api_latency_ms),
+                        max_ticker_age_ms=int(max_ticker_age_ms),
+                        max_spread_bps=float(max_spread_bps),
+                        min_trade_cooldown_seconds=int(min_trade_cooldown_seconds),
+                    )
+                    test_logs.append({
+                        "step": "live_test_order",
+                        "status": live_result.get("status"),
+                        "message": live_result.get("message", ""),
+                    })
+                else:
+                    test_logs.append({
+                        "step": "live_test_order",
+                        "status": "skipped",
+                        "message": "Live test skipped because minimum checks failed.",
+                    })
+            else:
+                test_logs.append({
+                    "step": "live_test_order",
+                    "status": "not_requested",
+                    "message": "Live test disabled or confirmation text missing.",
+                })
+
+            st.success("Trade test case completed.")
+            st.dataframe(pd.DataFrame(test_logs), use_container_width=True)
+        except Exception as test_exc:
+            st.error(wallet_permission_hint(test_exc))
 
 with ai_tab:
     st.subheader("AI Command Center")
@@ -1286,6 +1847,53 @@ with ai_tab:
     if st.button("Run AI Command"):
         message = apply_ai_command(ai_command)
         st.success(message)
+
+    st.markdown("### LLM Support Chat")
+    merge_context = {
+        "decision_engine": decision_engine,
+        "signal": signal,
+        "probability_up": probability_up,
+        "ml_probability_up": ml_probability_up,
+        "buy_threshold": effective_buy_threshold,
+        "sell_threshold": effective_sell_threshold,
+        "llm_overlay_status": llm_display_status,
+        "llm_merge_status": llm_merge.get("status", "disabled"),
+        "llm_merge_weight": llm_merge.get("merge_weight", 0.0),
+        "llm_confidence": llm_merge.get("llm_confidence", llm_overlay.get("confidence", 0.0)),
+    }
+    st.caption(
+        "Merge diagnostics: "
+        f"engine={merge_context['decision_engine']} | "
+        f"ml_prob={merge_context['ml_probability_up']:.3f} | "
+        f"final_prob={merge_context['probability_up']:.3f} | "
+        f"llm_overlay={merge_context['llm_overlay_status']} | "
+        f"llm_merge={merge_context['llm_merge_status']}"
+    )
+
+    chat_history = st.session_state.setdefault("support_chat_history", [])
+    for item in chat_history[-8:]:
+        role = item.get("role", "assistant")
+        content = str(item.get("content", ""))
+        with st.chat_message(role):
+            st.write(content)
+
+    support_prompt = st.chat_input("Ask support about signals, merge status, or safe actions")
+    if support_prompt:
+        chat_history.append({"role": "user", "content": support_prompt})
+        with st.chat_message("user"):
+            st.write(support_prompt)
+
+        support_result = llm_support_chat(
+            message=support_prompt,
+            context=merge_context,
+        )
+        assistant_msg = support_result.get("answer", "No answer.")
+        chat_history.append({"role": "assistant", "content": assistant_msg})
+        st.session_state["support_chat_history"] = chat_history
+        with st.chat_message("assistant"):
+            st.write(assistant_msg)
+        if support_result.get("status") != "ok":
+            st.caption(f"Support chat status: {support_result.get('status')} | {support_result.get('provider', '')} {support_result.get('model', '')}")
 
 # Keep the panel continuously live by triggering timed reruns.
 if auto_refresh_enabled:
