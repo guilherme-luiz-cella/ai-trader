@@ -535,7 +535,15 @@ def execute_withdraw(
             "message": "No order sent (dry-run). Disable dry-run and confirm to execute.",
         }
 
-    result = exchange.create_order(pair, "market", "sell", sell_qty)
+    try:
+        result = exchange.create_order(pair, "market", "sell", sell_qty)
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "pair": pair,
+            "sell_qty": sell_qty,
+            "message": str(exc),
+        }
     return {
         "status": "executed",
         "pair": pair,
@@ -1255,7 +1263,7 @@ with live_tab:
         logs = []
         for cycle in range(int(autopilot_cycles)):
             if st.session_state.get("autopilot_stop_requested"):
-                status_box.warning(f"Autopilot stopped by user after {cycle} cycle(s).")
+                status_box.warning(f"Autopilot stopped by user before cycle {cycle + 1}.")
                 break
             try:
                 point = append_live_history(
@@ -1467,6 +1475,6 @@ with ai_tab:
         st.success(message)
 
 # Keep the panel continuously live by triggering timed reruns.
-if auto_refresh_enabled and not st.session_state.get("autopilot_stop_requested"):
+if auto_refresh_enabled:
     time.sleep(int(auto_refresh_interval_seconds))
     st.rerun()
