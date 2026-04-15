@@ -6,6 +6,11 @@ Main entrypoint:
 
 - `python -m backend.app`
 
+Remote automation:
+
+- GitHub Actions deploy workflow: `.github/workflows/deploy-windows.yml`
+- GitHub Actions train workflow: `.github/workflows/train-windows.yml`
+
 Responsibilities:
 
 - model-backed signal generation

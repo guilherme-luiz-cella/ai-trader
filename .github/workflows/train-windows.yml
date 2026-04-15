@@ -1,0 +1,53 @@
+name: Train On Windows Runner
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: train-windows
+  cancel-in-progress: false
+
+jobs:
+  train:
+    runs-on:
+      - self-hosted
+      - windows
+      - x64
+      - ai-trader-windows
+
+    defaults:
+      run:
+        shell: powershell
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Ensure local env exists
+        run: |
+          if (-not (Test-Path ".env")) {
+            throw "Missing .env on the Windows runner workspace. Create it once on the runner machine before using this workflow."
+          }
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install training dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-api.txt
+
+      - name: Train model
+        run: |
+          python research/train_combined_model.py
+
+      - name: Rebuild backend after training
+        run: |
+          docker compose up -d --build signal-api
+
+      - name: Verify backend health
+        run: |
+          Start-Sleep -Seconds 5
+          Invoke-WebRequest -UseBasicParsing http://localhost:8765/health | Select-Object -ExpandProperty Content

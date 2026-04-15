@@ -143,3 +143,31 @@ Then open:
 
 - Frontend: `http://localhost:3000`
 - Backend health: `http://localhost:8765/health`
+
+## Remote Windows Build / Train
+
+The repo includes GitHub Actions workflows for a Windows self-hosted runner:
+
+- `.github/workflows/deploy-windows.yml`
+- `.github/workflows/train-windows.yml`
+
+Expected runner labels:
+
+- `self-hosted`
+- `windows`
+- `x64`
+- `ai-trader-windows`
+
+Expected runner setup:
+
+- the repo is checked out on the Windows machine
+- Docker Desktop is installed and running
+- `.env` exists in the repo workspace on Windows
+- Python 3.12+ is available for training jobs
+
+Workflow behavior:
+
+- deploy workflow runs automatically on pushes to `main`
+- training workflow runs manually from GitHub Actions with `workflow_dispatch`
+
+This lets you push from the Mac and have the Windows machine rebuild or train remotely without sitting near the desktop.

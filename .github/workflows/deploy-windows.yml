@@ -1,0 +1,48 @@
+name: Deploy On Windows Runner
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-windows
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on:
+      - self-hosted
+      - windows
+      - x64
+      - ai-trader-windows
+
+    defaults:
+      run:
+        shell: powershell
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Show versions
+        run: |
+          git --version
+          docker --version
+          docker compose version
+
+      - name: Ensure local env exists
+        run: |
+          if (-not (Test-Path ".env")) {
+            throw "Missing .env on the Windows runner workspace. Create it once on the runner machine before using this workflow."
+          }
+
+      - name: Rebuild and restart app
+        run: |
+          docker compose up -d --build signal-api frontend
+
+      - name: Verify backend health
+        run: |
+          Start-Sleep -Seconds 5
+          Invoke-WebRequest -UseBasicParsing http://localhost:8765/health | Select-Object -ExpandProperty Content
