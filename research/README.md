@@ -178,6 +178,15 @@ If you want a deployable API endpoint for your live stack, run `python -m backen
 - `LLM_CONFIDENCE_SOFT_GATE`: if `true`, low confidence scales merge weight down instead of fully disabling merge.
 - `LLM_TIMEOUT_SECONDS`: HTTP timeout for LLM requests, default `30`.
 - `LLM_BYPASS_ENV_PROXY`: if `true`, retries direct HTTPS without environment proxy when proxy tunnel fails.
+- `VOLATILITY_REGIME_ENABLED`: if `true`, auto-switches strategy behavior by volatility regime.
+- `VOLATILITY_LOOKBACK_ROWS`: number of recent rows used to estimate volatility.
+- `VOLATILITY_LOW_PCT`: volatility threshold for low regime.
+- `VOLATILITY_HIGH_PCT`: volatility threshold for high regime.
+- `VOLATILITY_EXTREME_PCT`: volatility threshold for extreme regime.
+- `LLM_MERGE_WEIGHT_HIGH`: LLM merge weight used in high-volatility regime.
+- `HIGH_REGIME_REQUIRE_LLM_CONFIRMATION`: if `true`, high-volatility trades require LLM confirmation.
+- `HIGH_REGIME_MIN_LLM_CONFIDENCE`: minimum LLM confidence required for high-volatility confirmation.
+- `EXTREME_REGIME_FORCE_HOLD`: if `true`, extreme volatility forces HOLD regardless of raw model signal.
 
 ### Free LLM Setup (Hugging Face)
 
