@@ -163,6 +163,10 @@ If you want a deployable API endpoint for your live stack, run `python -m backen
 - `COMBINED_DATASET_PATH`: path to the merged training dataset, default `research/data_sets/multi_symbol_training_dataset.csv` when `DATA_SYMBOLS` contains multiple symbols.
 - `TARGET_COLUMN`: label column name, default `target`.
 - `TEST_SIZE`: fraction of rows reserved for testing, default `0.2`.
+- `RECENCY_WEIGHT_ENABLED`: if `true`, upweights recent samples during training.
+- `RECENCY_HALF_LIFE_DAYS`: half-life used for recency decay weighting.
+- `RECENCY_MIN_WEIGHT`: lower bound for sample weights.
+- `RECENCY_MAX_WEIGHT`: upper bound for sample weights.
 
 ### Signal Generator Environment Variables
 

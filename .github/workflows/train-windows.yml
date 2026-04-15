@@ -40,10 +40,20 @@ jobs:
           pip install -r requirements-api.txt
 
       - name: Build enriched dataset
+        env:
+          TARGET_HORIZON: "4"
+          TARGET_RETURN_THRESHOLD: "0.006"
+          TARGET_DOWNSIDE_THRESHOLD: "-0.006"
         run: |
           python research/build_datasets.py
 
       - name: Train model
+        env:
+          TEST_SIZE: "0.2"
+          RECENCY_WEIGHT_ENABLED: "true"
+          RECENCY_HALF_LIFE_DAYS: "180"
+          RECENCY_MIN_WEIGHT: "0.30"
+          RECENCY_MAX_WEIGHT: "3.00"
         run: |
           python research/train_combined_model.py
 

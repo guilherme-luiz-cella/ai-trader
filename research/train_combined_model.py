@@ -17,7 +17,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import joblib
 import pandas as pd
@@ -41,6 +41,10 @@ DATASET_PATH = Path(
 )
 TARGET_COLUMN = os.getenv("TARGET_COLUMN", "target")
 TEST_SIZE = float(os.getenv("TEST_SIZE", "0.2"))
+RECENCY_WEIGHT_ENABLED = os.getenv("RECENCY_WEIGHT_ENABLED", "true").lower() == "true"
+RECENCY_HALF_LIFE_DAYS = float(os.getenv("RECENCY_HALF_LIFE_DAYS", "180"))
+RECENCY_MIN_WEIGHT = float(os.getenv("RECENCY_MIN_WEIGHT", "0.30"))
+RECENCY_MAX_WEIGHT = float(os.getenv("RECENCY_MAX_WEIGHT", "3.00"))
 
 
 @dataclass(frozen=True)
@@ -60,7 +64,7 @@ def load_dataset(path: Path) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
-def prepare_features(data: pd.DataFrame, target_column: str) -> Tuple[pd.DataFrame, pd.Series]:
+def prepare_features(data: pd.DataFrame, target_column: str) -> Tuple[pd.DataFrame, pd.Series, pd.Series]:
     frame = data.copy()
     if target_column not in frame.columns:
         raise ValueError(f"Target column not found: {target_column}")
@@ -77,10 +81,19 @@ def prepare_features(data: pd.DataFrame, target_column: str) -> Tuple[pd.DataFra
 
     features = frame[feature_columns].copy()
     labels = frame[target_column].astype(int)
-    return features, labels
+    if "timestamp" in frame.columns:
+        timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
+    else:
+        timestamps = pd.Series([pd.NaT] * len(frame), index=frame.index)
+    return features, labels, timestamps
 
 
-def chronological_split(features: pd.DataFrame, labels: pd.Series, test_size: float) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
+def chronological_split(
+    features: pd.DataFrame,
+    labels: pd.Series,
+    timestamps: pd.Series,
+    test_size: float,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series, pd.Series, pd.Series]:
     split_index = int(len(features) * (1 - test_size))
     if split_index <= 0 or split_index >= len(features):
         raise ValueError("Not enough rows to split train/test")
@@ -89,10 +102,28 @@ def chronological_split(features: pd.DataFrame, labels: pd.Series, test_size: fl
     x_test = features.iloc[split_index:].copy()
     y_train = labels.iloc[:split_index].copy()
     y_test = labels.iloc[split_index:].copy()
-    return x_train, x_test, y_train, y_test
+    t_train = timestamps.iloc[:split_index].copy()
+    t_test = timestamps.iloc[split_index:].copy()
+    return x_train, x_test, y_train, y_test, t_train, t_test
 
 
-def train_model(x_train: pd.DataFrame, y_train: pd.Series):
+def build_recency_weights(timestamps: pd.Series) -> pd.Series:
+    if not RECENCY_WEIGHT_ENABLED:
+        return pd.Series([1.0] * len(timestamps), index=timestamps.index, dtype=float)
+
+    parsed = pd.to_datetime(timestamps, errors="coerce")
+    if parsed.isna().all() or RECENCY_HALF_LIFE_DAYS <= 0:
+        return pd.Series([1.0] * len(timestamps), index=timestamps.index, dtype=float)
+
+    latest_ts = parsed.max()
+    age_days = (latest_ts - parsed).dt.total_seconds() / 86400.0
+    age_days = age_days.fillna(age_days.max() if not age_days.dropna().empty else 0.0)
+    decay = 0.5 ** (age_days / RECENCY_HALF_LIFE_DAYS)
+    weights = decay.clip(lower=RECENCY_MIN_WEIGHT, upper=RECENCY_MAX_WEIGHT)
+    return weights.astype(float)
+
+
+def train_model(x_train: pd.DataFrame, y_train: pd.Series, sample_weight: Optional[pd.Series] = None):
     gradient_model = HistGradientBoostingClassifier(
         learning_rate=0.05,
         max_depth=6,
@@ -116,7 +147,13 @@ def train_model(x_train: pd.DataFrame, y_train: pd.Series):
         voting="soft",
     )
     calibrated_model = CalibratedClassifierCV(estimator=ensemble, method="sigmoid", cv=3)
-    calibrated_model.fit(x_train, y_train)
+    if sample_weight is not None:
+        try:
+            calibrated_model.fit(x_train, y_train, sample_weight=sample_weight)
+        except TypeError:
+            calibrated_model.fit(x_train, y_train)
+    else:
+        calibrated_model.fit(x_train, y_train)
     return calibrated_model
 
 
@@ -128,6 +165,8 @@ def evaluate_model(model, x_train: pd.DataFrame, y_train: pd.Series, x_test: pd.
     return {
         "train_accuracy": float(accuracy_score(y_train, train_predictions)),
         "test_accuracy": float(accuracy_score(y_test, test_predictions)),
+        "train_positive_rate": float(pd.Series(y_train).mean()),
+        "test_positive_rate": float(pd.Series(y_test).mean()),
         "confusion_matrix": confusion_matrix(y_test, test_predictions).tolist(),
         "classification_report": classification_report(y_test, test_predictions, output_dict=True, zero_division=0),
         "mean_test_probability": float(pd.Series(test_probabilities).mean()),
@@ -160,11 +199,17 @@ def save_outputs(model, metrics: Dict[str, object], dataset: pd.DataFrame, symbo
 def main() -> None:
     dataset = load_dataset(DATASET_PATH)
     symbol = DATASET_PATH.stem.replace("_training_dataset", "")
-    features, labels = prepare_features(dataset, TARGET_COLUMN)
-    x_train, x_test, y_train, y_test = chronological_split(features, labels, TEST_SIZE)
+    features, labels, timestamps = prepare_features(dataset, TARGET_COLUMN)
+    x_train, x_test, y_train, y_test, t_train, _ = chronological_split(features, labels, timestamps, TEST_SIZE)
+    sample_weight = build_recency_weights(t_train)
 
-    model = train_model(x_train, y_train)
+    model = train_model(x_train, y_train, sample_weight=sample_weight)
     metrics = evaluate_model(model, x_train, y_train, x_test, y_test)
+    metrics["recency_weight_enabled"] = bool(RECENCY_WEIGHT_ENABLED)
+    metrics["recency_half_life_days"] = float(RECENCY_HALF_LIFE_DAYS)
+    metrics["recency_weight_min"] = float(sample_weight.min()) if len(sample_weight) else 1.0
+    metrics["recency_weight_max"] = float(sample_weight.max()) if len(sample_weight) else 1.0
+    metrics["recency_weight_mean"] = float(sample_weight.mean()) if len(sample_weight) else 1.0
     result = save_outputs(model, metrics, dataset, symbol)
 
     print("Training complete")
