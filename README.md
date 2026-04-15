@@ -112,8 +112,10 @@ Run locally:
 Endpoints:
 
 - `GET /health`
+- `GET /docs`
 - `GET /signal`
 - `GET /dashboard`
+- `GET /macro/fred`
 - `GET /autopilot/status`
 - `POST /autopilot/start`
 - `POST /autopilot/stop`
@@ -121,6 +123,15 @@ Endpoints:
 - `POST /trade/action`
 - `POST /support/chat`
 - `POST /ai/command`
+
+`/macro/fred` query params:
+
+- `series_id` (e.g. `DFF`, `CPIAUCSL`, `UNRATE`)
+- `limit` (default `24`)
+- `start_date` (`YYYY-MM-DD`)
+- `end_date` (`YYYY-MM-DD`)
+
+Set `FRED_API_KEY` in `.env` to enable FRED endpoint access.
 
 `/signal` accepts optional query parameters:
 

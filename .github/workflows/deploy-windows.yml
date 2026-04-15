@@ -25,6 +25,15 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          clean: true
+
+      - name: Ensure workspace matches pushed commit
+        run: |
+          git fetch --all --prune
+          git checkout $env:GITHUB_SHA
+          git rev-parse HEAD
 
       - name: Show versions
         run: |
@@ -40,9 +49,13 @@ jobs:
 
       - name: Rebuild and restart app
         run: |
-          docker compose up -d --build signal-api frontend
+          docker compose -f docker-compose.yml up -d --build --remove-orphans signal-api frontend
 
       - name: Verify backend health
         run: |
           Start-Sleep -Seconds 5
           Invoke-WebRequest -UseBasicParsing http://localhost:8765/health | Select-Object -ExpandProperty Content
+
+      - name: Show running services
+        run: |
+          docker compose -f docker-compose.yml ps

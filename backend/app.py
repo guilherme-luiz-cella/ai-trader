@@ -56,6 +56,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             if route == "/health":
                 self._send_json({"status": "ok"})
                 return
+            if route == "/docs":
+                self._send_json(services.get_api_docs())
+                return
             if route == "/signal":
                 payload = services.get_decision_payload(
                     buy_threshold=float(query.get("buy_threshold", [services.BUY_THRESHOLD])[0]),
@@ -63,6 +66,23 @@ class ApiHandler(BaseHTTPRequestHandler):
                     adaptive_threshold_enabled=str(query.get("adaptive_threshold_enabled", [services.ADAPTIVE_THRESHOLD_ENABLED])[0]).lower() in {"1", "true", "yes", "on"},
                 )
                 self._send_json(payload)
+                return
+            if route == "/macro/fred":
+                series_id = str(query.get("series_id", ["DFF"])[0])
+                limit = int(query.get("limit", [24])[0])
+                start_date = query.get("start_date", [None])[0]
+                end_date = query.get("end_date", [None])[0]
+                self._send_json(
+                    {
+                        "status": "ok",
+                        "fred": services.get_fred_series_observations(
+                            series_id=series_id,
+                            limit=limit,
+                            start_date=start_date,
+                            end_date=end_date,
+                        ),
+                    }
+                )
                 return
             if route == "/autopilot/status":
                 self._send_json({"status": "ok", "autopilot": services.autopilot_snapshot()})

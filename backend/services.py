@@ -53,6 +53,10 @@ BINANCE_BYPASS_ENV_PROXY = os.getenv("BINANCE_BYPASS_ENV_PROXY", "true").lower()
 BINANCE_TIMEOUT_SECONDS = int(os.getenv("BINANCE_TIMEOUT_SECONDS", "30"))
 CHECK_SYMBOL = os.getenv("CHECK_SYMBOL", "BTC/USDT")
 ACCOUNT_REFERENCE_USD = float(os.getenv("ACCOUNT_REFERENCE_USD", "6.93"))
+FRED_API_KEY = os.getenv("FRED_API_KEY", "").strip()
+FRED_BASE_URL = os.getenv("FRED_BASE_URL", "https://api.stlouisfed.org/fred").rstrip("/")
+FRED_TIMEOUT_SECONDS = int(os.getenv("FRED_TIMEOUT_SECONDS", "20"))
+FRED_BYPASS_ENV_PROXY = os.getenv("FRED_BYPASS_ENV_PROXY", "true").lower() == "true"
 
 STATE_LOCK = threading.Lock()
 RUNTIME_STATE: dict[str, Any] = {
@@ -174,6 +178,124 @@ def from_binance_market_id(symbol_id: str, quote_asset: str) -> str:
         base = symbol_id[: -len(quote)]
         return f"{base}/{quote}"
     return symbol_id
+
+
+def get_api_docs() -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "service": "TradingBackendAPI",
+        "version": "1.1",
+        "notes": [
+            "All responses are JSON.",
+            "Use FRED_API_KEY in .env to enable /macro/fred.",
+        ],
+        "env": {
+            "required": ["BINANCE_API_KEY", "BINANCE_API_SECRET"],
+            "optional": [
+                "FRED_API_KEY",
+                "FRED_BASE_URL",
+                "FRED_TIMEOUT_SECONDS",
+                "FRED_BYPASS_ENV_PROXY",
+            ],
+        },
+        "routes": {
+            "GET": {
+                "/health": {"description": "Service health check."},
+                "/signal": {
+                    "description": "Generate ML/LLM trading signal.",
+                    "query": ["buy_threshold", "sell_threshold", "adaptive_threshold_enabled"],
+                },
+                "/dashboard": {"description": "Aggregate dashboard payload."},
+                "/wallet": {"description": "Wallet balances and totals."},
+                "/account": {
+                    "description": "Symbol account snapshot.",
+                    "query": ["symbol"],
+                },
+                "/market-scan": {
+                    "description": "Scan symbols and rank opportunities.",
+                    "query": ["max_symbols", "quote_asset"],
+                },
+                "/live/history": {"description": "Recent captured live points."},
+                "/autopilot/status": {"description": "Autopilot runtime status."},
+                "/macro/fred": {
+                    "description": "Fetch FRED macro series observations and latest value.",
+                    "query": ["series_id", "limit", "start_date", "end_date"],
+                    "example": "/macro/fred?series_id=DFF&limit=24",
+                },
+                "/docs": {"description": "API documentation payload."},
+            },
+            "POST": {
+                "/autopilot/start": {"description": "Start autopilot loop."},
+                "/autopilot/stop": {"description": "Stop autopilot loop."},
+                "/trade/preview": {"description": "Preview trade checks without execution."},
+                "/trade/action": {"description": "Execute trade action (or dry-run)."},
+                "/live/capture": {"description": "Append live signal point."},
+                "/support/chat": {"description": "LLM support response for dashboard."},
+                "/ai/command": {"description": "Natural language command parser."},
+            },
+        },
+    }
+
+
+def get_fred_series_observations(
+    series_id: str,
+    limit: int = 24,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict[str, Any]:
+    if not FRED_API_KEY:
+        raise RuntimeError("FRED_API_KEY is missing. Set it in .env to use /macro/fred.")
+
+    norm_series = (series_id or "").strip().upper()
+    if not norm_series:
+        raise ValueError("series_id is required.")
+
+    sample_limit = max(1, min(int(limit), 1000))
+    params: dict[str, Any] = {
+        "api_key": FRED_API_KEY,
+        "file_type": "json",
+        "series_id": norm_series,
+        "sort_order": "desc",
+        "limit": sample_limit,
+    }
+    if start_date:
+        params["observation_start"] = str(start_date)
+    if end_date:
+        params["observation_end"] = str(end_date)
+
+    url = f"{FRED_BASE_URL}/series/observations"
+    with requests.Session() as session:
+        if FRED_BYPASS_ENV_PROXY:
+            session.trust_env = False
+        response = session.get(url, params=params, timeout=FRED_TIMEOUT_SECONDS)
+        response.raise_for_status()
+        payload = response.json()
+
+    observations_raw = payload.get("observations", [])
+    observations: list[dict[str, Any]] = []
+    for item in observations_raw:
+        value_text = str(item.get("value", "."))
+        value_num: float | None = None
+        if value_text not in {".", "", "nan", "NaN"}:
+            try:
+                value_num = float(value_text)
+            except ValueError:
+                value_num = None
+        observations.append(
+            {
+                "date": item.get("date"),
+                "value": value_num,
+                "value_raw": value_text,
+            }
+        )
+
+    latest = observations[0] if observations else {"date": None, "value": None, "value_raw": None}
+    return {
+        "series_id": norm_series,
+        "count": len(observations),
+        "latest": latest,
+        "observations": observations,
+    }
 
 
 def binance_public_json(path: str, params: dict[str, Any] | None = None) -> Any:
