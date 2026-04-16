@@ -1,0 +1,393 @@
+{
+  "search": {
+    "n_trials": 1,
+    "method": "adaptive_bayesian_like",
+    "objective": "maximize upgraded_sharpe_mean with penalties for drawdown/turnover/instability",
+    "parallel_workers": 1,
+    "parallel_mode": "sequential",
+    "tabular_profile": "very-light-debug",
+    "parallel_fallback_recommendation": "Use --parallel-workers 1 on Windows for small trial counts or if logs stall between trials.",
+    "avg_trial_seconds": 12.875539700002264,
+    "eta_after_first_trial_seconds": 0.0,
+    "resource_config": {
+      "detected": {
+        "platform": "Windows-11-10.0.26200-SP0",
+        "cpu_total_cores": 16,
+        "ram_total_gb": 31.103504180908203,
+        "ram_available_gb": 11.3519287109375,
+        "ram_percent_used": 63.5,
+        "gpu": {
+          "torch_cuda_available": true,
+          "torch_device_count": 1,
+          "selected_gpu": "NVIDIA GeForce RTX 3080 Ti",
+          "selected_index": 0,
+          "total_memory_gb": 11.99951171875,
+          "free_memory_gb": 10.80859375,
+          "nvidia_smi_detected": true,
+          "nvidia_smi_gpus": [
+            {
+              "index": 0,
+              "name": "NVIDIA GeForce RTX 3080 Ti",
+              "memory_total_mb": 12288.0,
+              "memory_free_mb": 9715.0,
+              "utilization_gpu_pct": 11.0
+            }
+          ]
+        }
+      },
+      "effective": {
+        "requested_cpu_threads": 12,
+        "effective_cpu_threads_per_worker": 12,
+        "parallel_workers": 1,
+        "oversubscription_guard": "not_needed"
+      }
+    }
+  },
+  "runtime_profile": {
+    "gpu_bound": [
+      "GRU sequence training/inference"
+    ],
+    "cpu_bound": [
+      "sklearn model training",
+      "RL allocation",
+      "portfolio simulation/backtesting"
+    ],
+    "io_bound": [
+      "CSV loading",
+      "artifact JSON/CSV writing"
+    ],
+    "windows_parallel_note": "Uses ThreadPool for parallel trials to avoid ProcessPool spawn/pickle overhead on Windows; for small trial counts prefer sequential (--parallel-workers 1).",
+    "windows_high_priority_recommendation": "Start-Process -FilePath c:/Users/lastf/Desktop/ai-trader/.venv/Scripts/python.exe -ArgumentList 'run_prod_alpha_hyperopt.py --trials 20 --run-production' -Priority High",
+    "wsl2_vs_native_note": "WSL2/Linux container often provides lower process/thread scheduling overhead for heavy Python/sklearn workloads; native Windows remains fine for single-worker runs with CUDA-enabled PyTorch.",
+    "average_stage_seconds": {
+      "prep": {
+        "data_loading": 0.00011530000119819306,
+        "feature_engineering": 5.400000009103678e-05,
+        "walk_forward_split_build": 0.0003712999969138764
+      },
+      "split": {
+        "split_preprocess": 0.005645700002787635,
+        "split_tabular_model_fit_gb": 0.5702200000014273,
+        "split_tabular_model_fit_rf": 0.0645431999982975,
+        "split_tabular_model_fit_mlp": 0.0461371000019426,
+        "split_tabular_train_backtest": 6.943711200001417,
+        "split_gru_train": 0.5529425999993691,
+        "split_backtest": 5.040220399998361
+      }
+    },
+    "estimated_speedup": {
+      "gpu": 1.0225393450025242,
+      "caching": 1.0000419865893624,
+      "parallelization": 1.0
+    },
+    "resource_detected": {
+      "platform": "Windows-11-10.0.26200-SP0",
+      "cpu_total_cores": 16,
+      "ram_total_gb": 31.103504180908203,
+      "ram_available_gb": 11.3519287109375,
+      "ram_percent_used": 63.5,
+      "gpu": {
+        "torch_cuda_available": true,
+        "torch_device_count": 1,
+        "selected_gpu": "NVIDIA GeForce RTX 3080 Ti",
+        "selected_index": 0,
+        "total_memory_gb": 11.99951171875,
+        "free_memory_gb": 10.80859375,
+        "nvidia_smi_detected": true,
+        "nvidia_smi_gpus": [
+          {
+            "index": 0,
+            "name": "NVIDIA GeForce RTX 3080 Ti",
+            "memory_total_mb": 12288.0,
+            "memory_free_mb": 9715.0,
+            "utilization_gpu_pct": 11.0
+          }
+        ]
+      }
+    },
+    "resource_effective": {
+      "requested_cpu_threads": 12,
+      "effective_cpu_threads_per_worker": 12,
+      "parallel_workers": 1,
+      "oversubscription_guard": "not_needed"
+    },
+    "tabular_profile": "very-light-debug",
+    "bound_status": "waiting_or_mixed"
+  },
+  "best_parameters": {
+    "min_confidence": 0.65896813311011,
+    "max_daily_turnover": 0.2648298851181773,
+    "cooldown_period": 5,
+    "blend_lookback_window": 47,
+    "position_cap": 0.17825320436629485,
+    "volatility_scaling": {
+      "vol_scale_target": 0.058903005823654014,
+      "vol_scale_floor": 0.32834191059710593,
+      "vol_scale_ceiling": 1.2502450136938674
+    }
+  },
+  "best_summary": {
+    "objective": 1.5327985326578615,
+    "upgraded_sharpe_mean": 1.289357458917344,
+    "upgraded_sharpe_std": 0.0,
+    "upgraded_max_drawdown_mean": -0.17205507512218454,
+    "upgraded_avg_turnover_mean": 0.011086270620572033,
+    "baseline_sharpe_mean": 0.7299610246136858,
+    "blended_sharpe_mean": 1.9157156857162692,
+    "beat_baseline_rate": 1.0,
+    "beat_blend_rate": 0.0
+  },
+  "robust_ranges": {
+    "min_confidence": {
+      "min": 0.65896813311011,
+      "p10": 0.65896813311011,
+      "median": 0.65896813311011,
+      "p90": 0.65896813311011,
+      "max": 0.65896813311011
+    },
+    "max_daily_turnover": {
+      "min": 0.2648298851181773,
+      "p10": 0.2648298851181773,
+      "median": 0.2648298851181773,
+      "p90": 0.2648298851181773,
+      "max": 0.2648298851181773
+    },
+    "signal_cooldown_steps": {
+      "min": 5.0,
+      "p10": 5.0,
+      "median": 5.0,
+      "p90": 5.0,
+      "max": 5.0
+    },
+    "blend_lookback": {
+      "min": 47.0,
+      "p10": 47.0,
+      "median": 47.0,
+      "p90": 47.0,
+      "max": 47.0
+    },
+    "max_position_weight": {
+      "min": 0.17825320436629485,
+      "p10": 0.17825320436629485,
+      "median": 0.17825320436629485,
+      "p90": 0.17825320436629485,
+      "max": 0.17825320436629485
+    },
+    "vol_scale_target": {
+      "min": 0.058903005823654014,
+      "p10": 0.058903005823654014,
+      "median": 0.058903005823654014,
+      "p90": 0.058903005823654014,
+      "max": 0.058903005823654014
+    },
+    "vol_scale_floor": {
+      "min": 0.32834191059710593,
+      "p10": 0.32834191059710593,
+      "median": 0.32834191059710593,
+      "p90": 0.32834191059710593,
+      "max": 0.32834191059710593
+    },
+    "vol_scale_ceiling": {
+      "min": 1.2502450136938674,
+      "p10": 1.2502450136938674,
+      "median": 1.2502450136938674,
+      "p90": 1.2502450136938674,
+      "max": 1.2502450136938674
+    }
+  },
+  "sensitivity": {
+    "spearman_vs_objective": {
+      "min_confidence": 0.0,
+      "max_daily_turnover": 0.0,
+      "signal_cooldown_steps": 0.0,
+      "blend_lookback": 0.0,
+      "max_position_weight": 0.0,
+      "vol_scale_target": 0.0,
+      "vol_scale_floor": 0.0,
+      "vol_scale_ceiling": 0.0
+    },
+    "robust_pool_size": 1,
+    "robust_ranges": {
+      "min_confidence": {
+        "min": 0.65896813311011,
+        "p10": 0.65896813311011,
+        "median": 0.65896813311011,
+        "p90": 0.65896813311011,
+        "max": 0.65896813311011
+      },
+      "max_daily_turnover": {
+        "min": 0.2648298851181773,
+        "p10": 0.2648298851181773,
+        "median": 0.2648298851181773,
+        "p90": 0.2648298851181773,
+        "max": 0.2648298851181773
+      },
+      "signal_cooldown_steps": {
+        "min": 5.0,
+        "p10": 5.0,
+        "median": 5.0,
+        "p90": 5.0,
+        "max": 5.0
+      },
+      "blend_lookback": {
+        "min": 47.0,
+        "p10": 47.0,
+        "median": 47.0,
+        "p90": 47.0,
+        "max": 47.0
+      },
+      "max_position_weight": {
+        "min": 0.17825320436629485,
+        "p10": 0.17825320436629485,
+        "median": 0.17825320436629485,
+        "p90": 0.17825320436629485,
+        "max": 0.17825320436629485
+      },
+      "vol_scale_target": {
+        "min": 0.058903005823654014,
+        "p10": 0.058903005823654014,
+        "median": 0.058903005823654014,
+        "p90": 0.058903005823654014,
+        "max": 0.058903005823654014
+      },
+      "vol_scale_floor": {
+        "min": 0.32834191059710593,
+        "p10": 0.32834191059710593,
+        "median": 0.32834191059710593,
+        "p90": 0.32834191059710593,
+        "max": 0.32834191059710593
+      },
+      "vol_scale_ceiling": {
+        "min": 1.2502450136938674,
+        "p10": 1.2502450136938674,
+        "median": 1.2502450136938674,
+        "p90": 1.2502450136938674,
+        "max": 1.2502450136938674
+      }
+    }
+  },
+  "baseline_reference": {
+    "num_folds": 1,
+    "upgraded": {
+      "sharpe_mean": 0.9715911610113209,
+      "sharpe_std": 0.0,
+      "max_drawdown_mean": -0.13431433445984176,
+      "max_drawdown_std": 0.0,
+      "avg_turnover_mean": 0.17816968484721196,
+      "avg_turnover_std": 0.0
+    },
+    "baseline": {
+      "sharpe_mean": 1.5125580979308528,
+      "max_drawdown_mean": -0.09872871644556125,
+      "avg_turnover_mean": 0.22318060369472076
+    },
+    "blended": {
+      "sharpe_mean": 2.600905682412568,
+      "max_drawdown_mean": -0.08574389045853126,
+      "avg_turnover_mean": 0.17816968484721196
+    },
+    "beat_baseline_rate": 0.0,
+    "beat_blend_rate": 0.0,
+    "objective": 0.8375516548812523,
+    "feature_count": 38,
+    "dropped_features": [
+      "body_pct",
+      "close",
+      "fred_cpiaucsl_diff_30",
+      "fred_cpiaucsl_diff_7",
+      "fred_dff",
+      "fred_dff_diff_30",
+      "fred_dff_diff_7",
+      "fred_dgs10_diff_30",
+      "fred_unrate_diff_30",
+      "fred_unrate_diff_7",
+      "high",
+      "log_ret",
+      "low",
+      "news_count",
+      "news_score",
+      "regime_trend_down",
+      "sma_10",
+      "sma_30",
+      "spread_proxy",
+      "ulcer_20"
+    ],
+    "cache_hits": {
+      "raw": false,
+      "features": false,
+      "splits": false
+    },
+    "prep_timings_seconds": {
+      "data_loading": 0.05755499999941094,
+      "feature_engineering": 0.5238615999987815,
+      "walk_forward_split_build": 0.001374999999825377
+    },
+    "fold_stage_mean_seconds": {
+      "split_preprocess": 0.005673899999237619,
+      "split_tabular_model_fit_gb": 0.569753200001287,
+      "split_tabular_model_fit_rf": 0.06583539999701316,
+      "split_tabular_model_fit_mlp": 0.05660530000022845,
+      "split_tabular_train_backtest": 7.452369399998133,
+      "split_gru_train": 1.4570840000014869,
+      "split_backtest": 4.959159800000634
+    },
+    "fold_stage_total_seconds": {
+      "split_preprocess": 0.005673899999237619,
+      "split_tabular_model_fit_gb": 0.569753200001287,
+      "split_tabular_model_fit_rf": 0.06583539999701316,
+      "split_tabular_model_fit_mlp": 0.05660530000022845,
+      "split_tabular_train_backtest": 7.452369399998133,
+      "split_gru_train": 1.4570840000014869,
+      "split_backtest": 4.959159800000634
+    },
+    "utilization_start": {
+      "cpu_percent": 9.1,
+      "ram_percent": 63.4,
+      "ram_used_gb": 19.718856811523438,
+      "gpu_index": 0,
+      "gpu_name": "NVIDIA GeForce RTX 3080 Ti",
+      "gpu_mem_used_gb": 1.19091796875,
+      "gpu_mem_total_gb": 11.99951171875,
+      "gpu_mem_used_pct": 9.924720244150558
+    },
+    "utilization_end": {
+      "cpu_percent": 8.8,
+      "ram_percent": 63.4,
+      "ram_used_gb": 19.732715606689453,
+      "gpu_index": 0,
+      "gpu_name": "NVIDIA GeForce RTX 3080 Ti",
+      "gpu_mem_used_gb": 1.32763671875,
+      "gpu_mem_total_gb": 11.99951171875,
+      "gpu_mem_used_pct": 11.064089521871821
+    },
+    "bound_status": "waiting_or_mixed"
+  },
+  "before_comparison_file": "C:\\Users\\lastf\\Desktop\\ai-trader\\research\\artifacts\\prod_alpha\\comparison_20260416_013714.json",
+  "after_production": {
+    "enabled": false,
+    "result": {}
+  },
+  "phase_timings_seconds": {
+    "hyperopt": 27.92258949999814,
+    "production": 0.0,
+    "total": 27.92258949999814
+  },
+  "before_vs_after": {
+    "upgraded": {
+      "sharpe": {},
+      "max_drawdown": {},
+      "avg_turnover": {}
+    },
+    "deployed": {
+      "sharpe": {},
+      "max_drawdown": {},
+      "avg_turnover": {}
+    }
+  },
+  "recommendation": "Keep meta_blend (upgraded standalone still less robust than blend).",
+  "artifacts": {
+    "trials_csv": "C:\\Users\\lastf\\Desktop\\ai-trader\\research\\artifacts\\prod_alpha\\hyperopt_trials_20260416_035448.csv",
+    "best_config": "C:\\Users\\lastf\\Desktop\\ai-trader\\research\\artifacts\\prod_alpha\\best_config_20260416_035448.json",
+    "best_config_latest": "C:\\Users\\lastf\\Desktop\\ai-trader\\research\\artifacts\\prod_alpha\\best_config_latest.json"
+  }
+}

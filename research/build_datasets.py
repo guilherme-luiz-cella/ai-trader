@@ -75,6 +75,99 @@ GDELT_MACRO_QUERY = os.getenv(
 )
 GDELT_TIMEOUT_SECONDS = int(os.getenv("GDELT_TIMEOUT_SECONDS", "30"))
 GDELT_BYPASS_ENV_PROXY = os.getenv("GDELT_BYPASS_ENV_PROXY", "true").lower() == "true"
+FNG_TIMEOUT_SECONDS = int(os.getenv("FNG_TIMEOUT_SECONDS", "20"))
+FNG_BYPASS_ENV_PROXY = os.getenv("FNG_BYPASS_ENV_PROXY", "true").lower() == "true"
+COINGECKO_TIMEOUT_SECONDS = int(os.getenv("COINGECKO_TIMEOUT_SECONDS", "30"))
+COINGECKO_BYPASS_ENV_PROXY = os.getenv("COINGECKO_BYPASS_ENV_PROXY", "true").lower() == "true"
+COINGECKO_AUTO_MAP_ENABLED = os.getenv("COINGECKO_AUTO_MAP_ENABLED", "true").lower() == "true"
+BINANCE_TIMEOUT_SECONDS = int(os.getenv("BINANCE_TIMEOUT_SECONDS", "20"))
+BINANCE_BYPASS_ENV_PROXY = os.getenv("BINANCE_BYPASS_ENV_PROXY", "true").lower() == "true"
+COINGECKO_SYMBOL_ID_MAP_RAW = os.getenv(
+    "COINGECKO_SYMBOL_ID_MAP",
+    "BTCUSDT:bitcoin,ETHUSDT:ethereum,SOLUSDT:solana",
+)
+
+
+def parse_symbol_id_map(raw: str) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for item in str(raw or "").split(","):
+        chunk = item.strip()
+        if not chunk or ":" not in chunk:
+            continue
+        symbol, coin_id = chunk.split(":", 1)
+        symbol = symbol.strip().upper()
+        coin_id = coin_id.strip().lower()
+        if symbol and coin_id:
+            mapping[symbol] = coin_id
+    return mapping
+
+
+COINGECKO_SYMBOL_ID_MAP = parse_symbol_id_map(COINGECKO_SYMBOL_ID_MAP_RAW)
+COINGECKO_DYNAMIC_CACHE: dict[str, str | None] = {}
+
+
+def split_base_quote_symbol(symbol: str) -> tuple[str, str]:
+    normalized = (symbol or "").upper().replace("/", "")
+    known_quotes = ["USDT", "USDC", "BUSD", "FDUSD", "TUSD", "DAI", "USD", "BTC", "ETH"]
+    for quote in known_quotes:
+        if normalized.endswith(quote) and len(normalized) > len(quote):
+            return normalized[: -len(quote)], quote
+    return normalized, ""
+
+
+def resolve_coingecko_id_for_symbol(symbol: str) -> str | None:
+    normalized = (symbol or "").upper().replace("/", "")
+    if not normalized:
+        return None
+
+    mapped = COINGECKO_SYMBOL_ID_MAP.get(normalized)
+    if mapped:
+        return mapped
+
+    if normalized in COINGECKO_DYNAMIC_CACHE:
+        return COINGECKO_DYNAMIC_CACHE[normalized]
+
+    if not COINGECKO_AUTO_MAP_ENABLED:
+        COINGECKO_DYNAMIC_CACHE[normalized] = None
+        return None
+
+    base_symbol, quote_symbol = split_base_quote_symbol(normalized)
+    if not base_symbol or not quote_symbol:
+        COINGECKO_DYNAMIC_CACHE[normalized] = None
+        return None
+
+    try:
+        with requests.Session() as session:
+            if COINGECKO_BYPASS_ENV_PROXY:
+                session.trust_env = False
+            response = session.get(
+                "https://api.coingecko.com/api/v3/search",
+                params={"query": base_symbol.lower()},
+                timeout=COINGECKO_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+            payload = response.json()
+
+        coins = payload.get("coins", []) if isinstance(payload, dict) else []
+        if not isinstance(coins, list):
+            coins = []
+
+        exact = [item for item in coins if str(item.get("symbol", "")).upper() == base_symbol]
+        candidates = exact if exact else coins
+        candidates = sorted(
+            candidates,
+            key=lambda item: (
+                10**9 if item.get("market_cap_rank") in {None, ""} else int(item.get("market_cap_rank")),
+                str(item.get("id", "")),
+            ),
+        )
+        resolved = str(candidates[0].get("id", "")).strip().lower() if candidates else ""
+        COINGECKO_DYNAMIC_CACHE[normalized] = resolved or None
+        return resolved or None
+    except Exception as exc:
+        print(f"Warning: CoinGecko symbol mapping failed for {normalized}: {exc}")
+        COINGECKO_DYNAMIC_CACHE[normalized] = None
+        return None
 
 TIMEFRAME_TO_RESOLUTION = {
     "1m": "1",
@@ -90,6 +183,19 @@ TIMEFRAME_TO_RESOLUTION = {
     "1mo": "M",
     "1mth": "M",
     "1M": "M",
+}
+
+TIMEFRAME_TO_BINANCE_INTERVAL = {
+    "1m": "1m",
+    "5m": "5m",
+    "15m": "15m",
+    "30m": "30m",
+    "1h": "1h",
+    "2h": "2h",
+    "4h": "4h",
+    "6h": "6h",
+    "1d": "1d",
+    "1w": "1w",
 }
 
 POSITIVE_WORDS = {
@@ -182,6 +288,181 @@ def fetch_price_history_for_symbol(symbol: str, timeframe: str, lookback_days: i
     )
     frame["symbol"] = symbol
     return frame.sort_values("timestamp").reset_index(drop=True)
+
+
+def is_crypto_symbol(symbol: str) -> bool:
+    token = (symbol or "").upper().replace("/", "")
+    if token in COINGECKO_SYMBOL_ID_MAP:
+        return True
+    common_quotes = ("USDT", "USD", "USDC", "BUSD", "BTC", "ETH")
+    return any(token.endswith(quote) and len(token) > len(quote) for quote in common_quotes)
+
+
+def symbol_to_binance_market_id(symbol: str) -> str:
+    return (symbol or "").upper().replace("/", "")
+
+
+def fetch_price_history_from_binance(symbol: str, timeframe: str, lookback_days: int) -> pd.DataFrame:
+    if timeframe not in TIMEFRAME_TO_BINANCE_INTERVAL:
+        raise ValueError(f"Unsupported timeframe for Binance fallback: {timeframe}")
+
+    market_id = symbol_to_binance_market_id(symbol)
+    interval = TIMEFRAME_TO_BINANCE_INTERVAL[timeframe]
+    end_dt = datetime.utcnow()
+    start_dt = end_dt - timedelta(days=lookback_days)
+    end_ms = int(end_dt.timestamp() * 1000)
+    start_ms = int(start_dt.timestamp() * 1000)
+
+    rows: list[list[object]] = []
+    cursor = start_ms
+    safety = 0
+    with requests.Session() as session:
+        if BINANCE_BYPASS_ENV_PROXY:
+            session.trust_env = False
+
+        while cursor < end_ms and safety < 40:
+            params = {
+                "symbol": market_id,
+                "interval": interval,
+                "startTime": cursor,
+                "endTime": end_ms,
+                "limit": 1000,
+            }
+            response = session.get("https://api.binance.com/api/v3/klines", params=params, timeout=BINANCE_TIMEOUT_SECONDS)
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, list) or not payload:
+                break
+
+            rows.extend(payload)
+            last_open_ms = int(payload[-1][0])
+            cursor = last_open_ms + 1
+            safety += 1
+
+    if not rows:
+        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "symbol"])
+
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime([item[0] for item in rows], unit="ms", utc=True).tz_convert(None),
+            "open": [float(item[1]) for item in rows],
+            "high": [float(item[2]) for item in rows],
+            "low": [float(item[3]) for item in rows],
+            "close": [float(item[4]) for item in rows],
+            "volume": [float(item[5]) for item in rows],
+            "symbol": symbol.upper(),
+        }
+    )
+    return frame.drop_duplicates(subset=["timestamp", "symbol"]).sort_values("timestamp").reset_index(drop=True)
+
+
+def fetch_price_history_from_coingecko(symbol: str, lookback_days: int) -> pd.DataFrame:
+    coin_id = COINGECKO_SYMBOL_ID_MAP.get(symbol.upper())
+    if not coin_id:
+        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "symbol"])
+
+    with requests.Session() as session:
+        if COINGECKO_BYPASS_ENV_PROXY:
+            session.trust_env = False
+        response = session.get(
+            f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart",
+            params={"vs_currency": "usd", "days": max(lookback_days, 30), "interval": "daily"},
+            timeout=COINGECKO_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        payload = response.json()
+
+    prices = payload.get("prices", [])
+    volumes = payload.get("total_volumes", [])
+    if not prices:
+        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "symbol"])
+
+    volume_by_day: dict[date, float] = {}
+    for item in volumes:
+        if not isinstance(item, list) or len(item) < 2:
+            continue
+        try:
+            d = pd.to_datetime(item[0], unit="ms", utc=True).date()
+            volume_by_day[d] = float(item[1])
+        except Exception:
+            continue
+
+    rows: list[dict[str, object]] = []
+    for item in prices:
+        if not isinstance(item, list) or len(item) < 2:
+            continue
+        try:
+            ts = pd.to_datetime(item[0], unit="ms", utc=True).tz_convert(None)
+            close = float(item[1])
+            d = ts.date()
+            rows.append(
+                {
+                    "timestamp": ts,
+                    "open": close,
+                    "high": close,
+                    "low": close,
+                    "close": close,
+                    "volume": float(volume_by_day.get(d, 0.0)),
+                    "symbol": symbol.upper(),
+                }
+            )
+        except Exception:
+            continue
+
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "symbol"])
+    return frame.sort_values("timestamp").drop_duplicates(subset=["timestamp", "symbol"]).reset_index(drop=True)
+
+
+def fetch_price_history_merged_for_symbol(symbol: str, timeframe: str, lookback_days: int, index: int) -> pd.DataFrame:
+    attempts: list[str] = []
+
+    if FINNHUB_API_KEY:
+        try:
+            frame = fetch_price_history_for_symbol(symbol, timeframe, lookback_days)
+            if not frame.empty:
+                frame["price_source"] = "finnhub"
+                return frame
+        except Exception as exc:
+            attempts.append(f"Finnhub: {exc}")
+
+    if is_crypto_symbol(symbol):
+        try:
+            frame = fetch_price_history_from_binance(symbol, timeframe, lookback_days)
+            if not frame.empty:
+                frame["price_source"] = "binance_public"
+                return frame
+        except Exception as exc:
+            attempts.append(f"Binance: {exc}")
+
+        try:
+            if timeframe.lower() == "1d":
+                frame = fetch_price_history_from_coingecko(symbol, lookback_days)
+                if not frame.empty:
+                    frame["price_source"] = "coingecko"
+                    return frame
+        except Exception as exc:
+            attempts.append(f"CoinGecko candles: {exc}")
+
+    if index == 0 and PRICE_DATA_PATH.exists():
+        frame = load_price_history(PRICE_DATA_PATH)
+        frame["symbol"] = symbol
+        frame["price_source"] = "local_csv"
+        return frame
+
+    joined = " | ".join(attempts) if attempts else "No sources attempted"
+    raise RuntimeError(f"No price data source available for {symbol}. Attempts: {joined}")
+
+
+def safe_fetch_dataframe(label: str, builder, columns: list[str] | None = None) -> pd.DataFrame:
+    try:
+        frame = builder()
+        if isinstance(frame, pd.DataFrame):
+            return frame
+    except Exception as exc:
+        print(f"Warning: {label} fetch failed: {exc}")
+    return pd.DataFrame(columns=columns or [])
 
 
 def load_price_history(path: Path) -> pd.DataFrame:
@@ -450,12 +731,16 @@ def fetch_gdelt_timeline(query: str, lookback_days: int, column_name: str) -> pd
         "timelinesmooth": 0,
     }
 
-    with requests.Session() as session:
-        if GDELT_BYPASS_ENV_PROXY:
-            session.trust_env = False
-        response = session.get("https://api.gdeltproject.org/api/v2/doc/doc", params=params, timeout=GDELT_TIMEOUT_SECONDS)
-        response.raise_for_status()
-        payload = response.json()
+    try:
+        with requests.Session() as session:
+            if GDELT_BYPASS_ENV_PROXY:
+                session.trust_env = False
+            response = session.get("https://api.gdeltproject.org/api/v2/doc/doc", params=params, timeout=GDELT_TIMEOUT_SECONDS)
+            response.raise_for_status()
+            payload = response.json()
+    except Exception as exc:
+        print(f"Warning: GDELT fetch failed for {column_name}: {exc}")
+        return pd.DataFrame(columns=["date", column_name])
 
     rows = []
     for item in payload.get("timeline", []):
@@ -478,6 +763,122 @@ def fetch_gdelt_timeline(query: str, lookback_days: int, column_name: str) -> pd
         rows.append({"date": parsed_date, column_name: value})
 
     return pd.DataFrame(rows).sort_values("date").reset_index(drop=True)
+
+
+def fetch_fear_greed_features(lookback_days: int) -> pd.DataFrame:
+    end_date = date.today()
+    start_date = end_date - timedelta(days=max(lookback_days, 30))
+    try:
+        with requests.Session() as session:
+            if FNG_BYPASS_ENV_PROXY:
+                session.trust_env = False
+            response = session.get(
+                "https://api.alternative.me/fng/",
+                params={"limit": 0, "format": "json"},
+                timeout=FNG_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+            payload = response.json()
+    except Exception as exc:
+        print(f"Warning: Fear & Greed fetch failed: {exc}")
+        return pd.DataFrame(columns=["date", "fng_value", "fng_value_7d", "fng_value_diff_7"])
+
+    rows: list[dict[str, float | date]] = []
+    for item in payload.get("data", []):
+        ts = item.get("timestamp")
+        try:
+            row_date = datetime.utcfromtimestamp(int(ts)).date() if ts is not None else None
+        except (TypeError, ValueError):
+            row_date = None
+        if row_date is None or row_date < start_date:
+            continue
+        try:
+            value = float(item.get("value", 0.0))
+        except (TypeError, ValueError):
+            value = 0.0
+        rows.append({"date": row_date, "fng_value": value / 100.0})
+
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return pd.DataFrame(columns=["date", "fng_value", "fng_value_7d", "fng_value_diff_7"])
+    frame = frame.sort_values("date").drop_duplicates(subset=["date"], keep="last").reset_index(drop=True)
+    frame["fng_value_7d"] = frame["fng_value"].rolling(7, min_periods=1).mean()
+    frame["fng_value_diff_7"] = frame["fng_value"].diff(7)
+    return frame
+
+
+def fetch_coingecko_symbol_features(symbol: str, coin_id: str, lookback_days: int) -> pd.DataFrame:
+    try:
+        with requests.Session() as session:
+            if COINGECKO_BYPASS_ENV_PROXY:
+                session.trust_env = False
+            response = session.get(
+                f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart",
+                params={"vs_currency": "usd", "days": max(lookback_days, 30), "interval": "daily"},
+                timeout=COINGECKO_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+            payload = response.json()
+    except Exception as exc:
+        print(f"Warning: CoinGecko fetch failed for {symbol}/{coin_id}: {exc}")
+        return pd.DataFrame(columns=["date", "symbol", "cg_close_usd", "cg_market_cap_usd", "cg_total_volume_usd"])
+
+    def _to_daily_map(entries: list[list[float]]) -> dict[date, float]:
+        mapped: dict[date, float] = {}
+        for item in entries or []:
+            if not isinstance(item, list) or len(item) < 2:
+                continue
+            try:
+                row_date = pd.to_datetime(item[0], unit="ms", utc=True).date()
+                mapped[row_date] = float(item[1])
+            except Exception:
+                continue
+        return mapped
+
+    prices = _to_daily_map(payload.get("prices", []))
+    market_caps = _to_daily_map(payload.get("market_caps", []))
+    volumes = _to_daily_map(payload.get("total_volumes", []))
+
+    all_dates = sorted(set(prices) | set(market_caps) | set(volumes))
+    rows: list[dict[str, float | str | date]] = []
+    for row_date in all_dates:
+        rows.append(
+            {
+                "date": row_date,
+                "symbol": symbol,
+                "cg_close_usd": float(prices.get(row_date, 0.0) or 0.0),
+                "cg_market_cap_usd": float(market_caps.get(row_date, 0.0) or 0.0),
+                "cg_total_volume_usd": float(volumes.get(row_date, 0.0) or 0.0),
+            }
+        )
+
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return pd.DataFrame(columns=["date", "symbol", "cg_close_usd", "cg_market_cap_usd", "cg_total_volume_usd"])
+
+    frame = frame.sort_values("date").reset_index(drop=True)
+    frame["cg_return_1"] = frame["cg_close_usd"].pct_change(1)
+    frame["cg_return_7"] = frame["cg_close_usd"].pct_change(7)
+    frame["cg_volume_change_1"] = frame["cg_total_volume_usd"].pct_change(1)
+    frame["cg_market_cap_change_1"] = frame["cg_market_cap_usd"].pct_change(1)
+    return frame
+
+
+def build_coingecko_features(symbols: list[str], lookback_days: int) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = []
+    for symbol in symbols:
+        coin_id = resolve_coingecko_id_for_symbol(symbol.upper())
+        if not coin_id:
+            continue
+        try:
+            frame = fetch_coingecko_symbol_features(symbol.upper(), coin_id, lookback_days)
+        except Exception:
+            continue
+        if not frame.empty:
+            frames.append(frame)
+    if not frames:
+        return pd.DataFrame(columns=["date", "symbol"])
+    return pd.concat(frames, ignore_index=True).sort_values(["symbol", "date"]).reset_index(drop=True)
 
 
 def build_gdelt_features() -> pd.DataFrame:
@@ -548,6 +949,7 @@ def build_daily_context(
     daily_news: pd.DataFrame,
     fred_features: pd.DataFrame,
     gdelt_features: pd.DataFrame,
+    fear_greed_features: pd.DataFrame,
 ) -> pd.DataFrame:
     if price_history.empty:
         return pd.DataFrame(columns=["date"])
@@ -556,7 +958,7 @@ def build_daily_context(
     date_index = pd.DataFrame({"date": pd.date_range(price_dates.min(), price_dates.max(), freq="D").date})
 
     context = date_index.copy()
-    for frame in [daily_news, fred_features, gdelt_features]:
+    for frame in [daily_news, fred_features, gdelt_features, fear_greed_features]:
         if frame is not None and not frame.empty:
             context = context.merge(frame, on="date", how="left")
 
@@ -582,6 +984,8 @@ def build_training_dataset(
     daily_news: pd.DataFrame,
     fred_features: pd.DataFrame,
     gdelt_features: pd.DataFrame,
+    fear_greed_features: pd.DataFrame,
+    coingecko_features: pd.DataFrame,
     horizon: int = 1,
     target_return_threshold: float = 0.003,
     target_downside_threshold: float = -0.003,
@@ -620,13 +1024,36 @@ def build_training_dataset(
         feature_frames.append(group)
 
     frame = pd.concat(feature_frames, ignore_index=True)
-    daily_context = build_daily_context(frame, daily_news, fred_features, gdelt_features)
+    daily_context = build_daily_context(frame, daily_news, fred_features, gdelt_features, fear_greed_features)
     merged = frame.merge(daily_context, on="date", how="left")
 
-    for column in [col for col in merged.columns if col.startswith("fred_") or col.startswith("gdelt_")]:
+    if coingecko_features is not None and not coingecko_features.empty:
+        merged = merged.merge(coingecko_features, on=["date", "symbol"], how="left")
+
+    news_context_cols = [col for col in ["news_count", "headline_score", "summary_score", "total_score", "unique_sources"] if col in merged.columns]
+    fred_context_cols = [col for col in merged.columns if col.startswith("fred_")]
+    gdelt_context_cols = [col for col in merged.columns if col.startswith("gdelt_")]
+    fng_context_cols = [col for col in merged.columns if col.startswith("fng_")]
+    cg_context_cols = [col for col in merged.columns if col.startswith("cg_")]
+
+    merged["data_has_news_context"] = merged[news_context_cols].notna().any(axis=1).astype(float) if news_context_cols else 0.0
+    merged["data_has_fred_context"] = merged[fred_context_cols].notna().any(axis=1).astype(float) if fred_context_cols else 0.0
+    merged["data_has_gdelt_context"] = merged[gdelt_context_cols].notna().any(axis=1).astype(float) if gdelt_context_cols else 0.0
+    merged["data_has_fng_context"] = merged[fng_context_cols].notna().any(axis=1).astype(float) if fng_context_cols else 0.0
+    merged["data_has_cg_context"] = merged[cg_context_cols].notna().any(axis=1).astype(float) if cg_context_cols else 0.0
+    coverage_flags = [
+        "data_has_news_context",
+        "data_has_fred_context",
+        "data_has_gdelt_context",
+        "data_has_fng_context",
+        "data_has_cg_context",
+    ]
+    merged["data_context_coverage"] = merged[coverage_flags].mean(axis=1)
+
+    for column in [col for col in merged.columns if col.startswith("fred_") or col.startswith("gdelt_") or col.startswith("fng_") or col.startswith("cg_")]:
         merged[column] = merged[column].fillna(0)
 
-    merged["target"] = pd.NA
+    merged["target"] = float("nan")
     merged.loc[merged["future_return"] >= target_return_threshold, "target"] = 1
     merged.loc[merged["future_return"] <= target_downside_threshold, "target"] = 0
     merged["target"] = merged["target"].astype("float")
@@ -680,9 +1107,29 @@ def build_training_dataset(
         "gdelt_total_news_7d",
         "gdelt_total_news_30d",
         "gdelt_crypto_share",
+        "fng_value",
+        "fng_value_7d",
+        "fng_value_diff_7",
+        "cg_close_usd",
+        "cg_market_cap_usd",
+        "cg_total_volume_usd",
+        "cg_return_1",
+        "cg_return_7",
+        "cg_volume_change_1",
+        "cg_market_cap_change_1",
+        "data_has_news_context",
+        "data_has_fred_context",
+        "data_has_gdelt_context",
+        "data_has_fng_context",
+        "data_has_cg_context",
+        "data_context_coverage",
     ]
 
     feature_columns.extend([column for column in merged.columns if column.startswith("fred_")])
+
+    for column in feature_columns:
+        if column not in merged.columns:
+            merged[column] = 0.0
 
     dataset = merged[["timestamp", "date", "symbol"] + feature_columns + ["future_return", "target", "target_label"]].dropna().reset_index(drop=True)
     dataset["target"] = dataset["target"].astype(int)
@@ -700,7 +1147,11 @@ def main() -> None:
     symbol_frames: list[pd.DataFrame] = []
     all_company_news: list[pd.DataFrame] = []
 
-    market_news = fetch_market_news()
+    market_news = safe_fetch_dataframe(
+        "market_news",
+        fetch_market_news,
+        columns=["datetime", "headline", "summary", "source", "category", "url", "related", "id"],
+    )
     market_news_path = save_dataset(market_news, "market_news.csv")
     print(f"Saved {market_news_path.name} ({len(market_news)} rows)")
 
@@ -712,46 +1163,64 @@ def main() -> None:
     gdelt_path = save_dataset(gdelt_features, "gdelt_event_features.csv")
     print(f"Saved {gdelt_path.name} ({len(gdelt_features)} rows)")
 
-    earnings_calendar = fetch_earnings_calendar()
+    fear_greed_features = fetch_fear_greed_features(max(DATA_LOOKBACK_DAYS, 365))
+    fear_greed_path = save_dataset(fear_greed_features, "fear_greed_features.csv")
+    print(f"Saved {fear_greed_path.name} ({len(fear_greed_features)} rows)")
+
+    coingecko_features = build_coingecko_features(DATA_SYMBOLS, max(DATA_LOOKBACK_DAYS, 365))
+    coingecko_path = save_dataset(coingecko_features, "coingecko_market_features.csv")
+    print(f"Saved {coingecko_path.name} ({len(coingecko_features)} rows)")
+
+    earnings_calendar = safe_fetch_dataframe("earnings_calendar", fetch_earnings_calendar, columns=["date"])
     earnings_calendar_path = save_dataset(earnings_calendar, "earnings_calendar.csv")
     print(f"Saved {earnings_calendar_path.name} ({len(earnings_calendar)} rows)")
 
-    market_status = fetch_market_status(MARKET_EXCHANGE)
+    market_status = safe_fetch_dataframe("market_status", lambda: fetch_market_status(MARKET_EXCHANGE), columns=["exchange"])
     market_status_path = save_dataset(market_status, f"market_status_{MARKET_EXCHANGE.lower()}.csv")
     print(f"Saved {market_status_path.name} ({len(market_status)} rows)")
 
     for index, symbol in enumerate(DATA_SYMBOLS):
-        if FINNHUB_API_KEY:
-            price_history = fetch_price_history_for_symbol(symbol, DATA_TIMEFRAME, DATA_LOOKBACK_DAYS)
-        elif index == 0:
-            price_history = load_price_history(PRICE_DATA_PATH)
-            price_history["symbol"] = symbol
-        else:
-            raise RuntimeError("Multi-symbol dataset build requires FINNHUB_API_KEY so each symbol can fetch its own candles.")
+        price_history = fetch_price_history_merged_for_symbol(symbol, DATA_TIMEFRAME, DATA_LOOKBACK_DAYS, index)
 
         symbol_frames.append(price_history)
-        company_news = fetch_company_news(symbol, NEWS_LOOKBACK_DAYS)
+        company_news = safe_fetch_dataframe(
+            f"company_news_{symbol}",
+            lambda s=symbol: fetch_company_news(s, NEWS_LOOKBACK_DAYS),
+            columns=["symbol", "datetime", "headline", "summary", "source", "category", "url", "related"],
+        )
         all_company_news.append(company_news)
         company_news_path = save_dataset(company_news, f"{symbol.lower()}_company_news.csv")
         print(f"Saved {company_news_path.name} ({len(company_news)} rows)")
 
-        earnings_surprises = fetch_earnings_surprises(symbol)
+        earnings_surprises = safe_fetch_dataframe(
+            f"earnings_surprises_{symbol}",
+            lambda s=symbol: fetch_earnings_surprises(s),
+            columns=["period"],
+        )
         earnings_surprises_path = save_dataset(earnings_surprises, f"{symbol.lower()}_earnings_surprises.csv")
         print(f"Saved {earnings_surprises_path.name} ({len(earnings_surprises)} rows)")
 
-        quote = fetch_quote(symbol)
+        quote = safe_fetch_dataframe(f"quote_{symbol}", lambda s=symbol: fetch_quote(s), columns=["symbol", "fetched_at"])
         quote_path = save_dataset(quote, f"{symbol.lower()}_quote.csv")
         print(f"Saved {quote_path.name} ({len(quote)} rows)")
 
-        company_profile2 = fetch_company_profile2(symbol)
+        company_profile2 = safe_fetch_dataframe(
+            f"company_profile2_{symbol}",
+            lambda s=symbol: fetch_company_profile2(s),
+            columns=["symbol"],
+        )
         profile_path = save_dataset(company_profile2, f"{symbol.lower()}_company_profile2.csv")
         print(f"Saved {profile_path.name} ({len(company_profile2)} rows)")
 
-        recommendation_trends = fetch_recommendation_trends(symbol)
+        recommendation_trends = safe_fetch_dataframe(
+            f"recommendation_trends_{symbol}",
+            lambda s=symbol: fetch_recommendation_trends(s),
+            columns=["period"],
+        )
         recommendation_path = save_dataset(recommendation_trends, f"{symbol.lower()}_recommendation_trends.csv")
         print(f"Saved {recommendation_path.name} ({len(recommendation_trends)} rows)")
 
-        peers = fetch_company_peers(symbol)
+        peers = safe_fetch_dataframe(f"peers_{symbol}", lambda s=symbol: fetch_company_peers(s), columns=["symbol"])
         peers_path = save_dataset(peers, f"{symbol.lower()}_peers.csv")
         print(f"Saved {peers_path.name} ({len(peers)} rows)")
 
@@ -782,6 +1251,8 @@ def main() -> None:
         daily_news,
         fred_features,
         gdelt_features,
+        fear_greed_features,
+        coingecko_features,
         horizon=TARGET_HORIZON,
         target_return_threshold=TARGET_RETURN_THRESHOLD,
         target_downside_threshold=TARGET_DOWNSIDE_THRESHOLD,

@@ -1,8 +1,9 @@
 {
 	email {$ACME_EMAIL}
+	auto_https disable_redirects
 }
 
-{$APP_DOMAIN:localhost} {
+(app_routes) {
 	encode zstd gzip
 
 	handle_path /api/* {
@@ -10,7 +11,7 @@
 	}
 
 	handle /health {
-		respond "ok" 200
+		reverse_proxy signal-api:8765
 	}
 
 	handle {
@@ -18,4 +19,13 @@
 		try_files {path} /index.html
 		file_server
 	}
+}
+
+:80 {
+	import app_routes
+}
+
+{$APP_DOMAIN:localhost} {
+	tls {$ACME_EMAIL}
+	import app_routes
 }

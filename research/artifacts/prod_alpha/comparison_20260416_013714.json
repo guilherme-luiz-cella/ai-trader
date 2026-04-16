@@ -1,0 +1,154 @@
+{
+  "config": {
+    "assets": [
+      "BTC",
+      "ETH",
+      "SOL"
+    ],
+    "horizon": 3,
+    "fee_bps": 8.0,
+    "slippage_bps": 5.0,
+    "latency_steps": 1
+  },
+  "walk_forward_model_selection": {
+    "gb": -0.08945453241198935,
+    "rf": 0.021763249641648552,
+    "mlp": -0.2693610669433396,
+    "gru": -0.023956480690223804
+  },
+  "ensemble_weights": {
+    "gb": 0.19573862296297428,
+    "rf": 0.4162868603256343,
+    "mlp": 0.3879745167113914
+  },
+  "calibration": {
+    "temperature": 2.0
+  },
+  "feature_pruning": {
+    "kept": 38,
+    "dropped": [
+      "body_pct",
+      "close",
+      "fred_cpiaucsl_diff_30",
+      "fred_cpiaucsl_diff_7",
+      "fred_dff",
+      "fred_dff_diff_30",
+      "fred_dff_diff_7",
+      "fred_dgs10_diff_30",
+      "fred_unrate_diff_30",
+      "fred_unrate_diff_7",
+      "high",
+      "log_ret",
+      "low",
+      "news_count",
+      "news_score",
+      "regime_trend_down",
+      "sma_10",
+      "sma_30",
+      "spread_proxy",
+      "ulcer_20"
+    ]
+  },
+  "prediction_metrics": {
+    "upgraded_accuracy": 0.19979134063641105,
+    "upgraded_macro_f1": 0.13949393566362175,
+    "baseline_accuracy": 0.38601982263954093,
+    "baseline_macro_f1": 0.3167207184719581
+  },
+  "baseline_backtest": {
+    "sharpe": 0.6340584248038174,
+    "sortino": 0.9510970882083326,
+    "max_drawdown": -0.24451392770279134,
+    "win_loss_ratio": 0.8102409638554217,
+    "cagr": 0.12888463320529753,
+    "total_return": 0.3710585482785489,
+    "avg_daily_return": 0.0005882301921111986,
+    "num_trades": 1192,
+    "avg_turnover": 0.23823213282782466,
+    "max_turnover": 0.35
+  },
+  "upgraded_backtest": {
+    "sharpe": 0.4656597903017959,
+    "sortino": 0.6655613377602697,
+    "max_drawdown": -0.25948455189899544,
+    "win_loss_ratio": 0.8959537572254336,
+    "cagr": 0.08085518695925398,
+    "total_return": 0.22434194173638722,
+    "avg_daily_return": 0.00040290668355722533,
+    "num_trades": 1050,
+    "avg_turnover": 0.29779125806774465,
+    "max_turnover": 0.375
+  },
+  "blended_backtest": {
+    "sharpe": 1.5808630531854895,
+    "sortino": 2.575708906466116,
+    "max_drawdown": -0.21416103065823477,
+    "win_loss_ratio": 0.8972809667673716,
+    "cagr": 0.4154378740994751,
+    "total_return": 1.4705584333123558,
+    "avg_daily_return": 0.0014902671054995128,
+    "num_trades": 1050,
+    "avg_turnover": 0.23823213282782466,
+    "max_turnover": 0.35
+  },
+  "deployed_strategy": "meta_blend",
+  "deployed_backtest": {
+    "sharpe": 1.5808630531854895,
+    "sortino": 2.575708906466116,
+    "max_drawdown": -0.21416103065823477,
+    "win_loss_ratio": 0.8972809667673716,
+    "cagr": 0.4154378740994751,
+    "total_return": 1.4705584333123558,
+    "avg_daily_return": 0.0014902671054995128,
+    "num_trades": 1050,
+    "avg_turnover": 0.23823213282782466,
+    "max_turnover": 0.35
+  },
+  "diagnostics": {
+    "baseline": {
+      "action_counts": {
+        "BUY": 591,
+        "SELL": 453,
+        "STOP_LOSS": 101,
+        "TAKE_PROFIT": 47
+      },
+      "avg_hold_days": 2.403883495145631,
+      "avg_trade_cost_rate": 0.001536673751596052,
+      "cost_drag_proxy": 1.831715111902494
+    },
+    "upgraded": {
+      "action_counts": {
+        "STOP_LOSS": 598,
+        "TAKE_PROFIT": 377,
+        "BUY": 74,
+        "SELL": 1
+      },
+      "avg_hold_days": 3.5428571428571427,
+      "avg_trade_cost_rate": 0.001591241163589146,
+      "cost_drag_proxy": 1.6708032217686033
+    }
+  },
+  "monitoring": {
+    "feature_drift_flags": {
+      "drifted_columns": [],
+      "total_columns": 38,
+      "drift_ratio": 0.0
+    },
+    "performance_decay": {
+      "baseline_sharpe": 0.6340584248038174,
+      "upgraded_sharpe": 0.4656597903017959,
+      "delta_sharpe": -0.16839863450202147,
+      "status": "degraded"
+    },
+    "signal_filtering": {
+      "blocked_low_conf": 1804,
+      "blocked_low_edge": 0,
+      "blocked_cooldown": 0,
+      "flip_count": 1
+    }
+  },
+  "artifacts": {
+    "predictions": "C:\\Users\\lastf\\Desktop\\ai-trader\\research\\artifacts\\prod_alpha\\predictions_20260416_013714.csv",
+    "trades": "C:\\Users\\lastf\\Desktop\\ai-trader\\research\\artifacts\\prod_alpha\\trades_20260416_013714.json"
+  }
+}

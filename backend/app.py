@@ -54,7 +54,15 @@ class ApiHandler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
         try:
             if route == "/health":
-                self._send_json({"status": "ok"})
+                self._send_json(
+                    {
+                        "status": "ok",
+                        "llm_status": services.get_llm_status(),
+                        "notification_status": services.get_notification_status(),
+                        "autopilot": services.autopilot_snapshot(),
+                        "burn_in_report": services.build_burn_in_validation_report(),
+                    }
+                )
                 return
             if route == "/docs":
                 self._send_json(services.get_api_docs())
@@ -87,6 +95,12 @@ class ApiHandler(BaseHTTPRequestHandler):
             if route == "/autopilot/status":
                 self._send_json({"status": "ok", "autopilot": services.autopilot_snapshot()})
                 return
+            if route == "/autopilot/reconcile":
+                self._send_json({"status": "ok", "reconciliation": services.reconcile_interrupted_autopilot_state(), "autopilot": services.autopilot_snapshot()})
+                return
+            if route == "/autopilot/readiness":
+                self._send_json({"status": "ok", "burn_in_report": services.build_burn_in_validation_report(), "autopilot": services.autopilot_snapshot()})
+                return
             if route == "/dashboard":
                 config = {
                     "buy_threshold": float(query.get("buy_threshold", [services.BUY_THRESHOLD])[0]),
@@ -102,10 +116,14 @@ class ApiHandler(BaseHTTPRequestHandler):
                     "max_drawdown_pct": float(query.get("max_drawdown_pct", [0.15])[0]),
                     "withdrawal_target_pct": float(query.get("withdrawal_target_pct", [0.25])[0]),
                     "size_min_confidence": float(query.get("size_min_confidence", [services.SIZE_MIN_CONFIDENCE])[0]),
+                    "decision_min_confidence": float(query.get("decision_min_confidence", [services.DECISION_MIN_CONFIDENCE])[0]),
                     "live_symbol": str(query.get("live_symbol", [services.CHECK_SYMBOL])[0]),
                     "market_scan_enabled": str(query.get("market_scan_enabled", ["true"])[0]).lower() in {"1", "true", "yes", "on"},
                     "market_scan_max_symbols": int(query.get("market_scan_max_symbols", [60])[0]),
                     "market_scan_quote_asset": str(query.get("market_scan_quote_asset", ["USDT"])[0]),
+                    "target_monitor_symbols": str(query.get("target_monitor_symbols", [",".join(services.TARGET_MONITOR_SYMBOLS)])[0]),
+                    "stable_asset": str(query.get("stable_asset", [services.PROFIT_PARKING_STABLE_ASSET])[0]),
+                    "stable_reserve_min_pct": float(query.get("stable_reserve_min_pct", [services.STABLE_RESERVE_MIN_PCT])[0]),
                 }
                 self._send_json(services.get_dashboard_payload(config))
                 return
@@ -120,6 +138,20 @@ class ApiHandler(BaseHTTPRequestHandler):
                 max_symbols = int(query.get("max_symbols", [60])[0])
                 quote_asset = str(query.get("quote_asset", ["USDT"])[0])
                 self._send_json({"status": "ok", "rows": services.build_market_scan(max_symbols, quote_asset)})
+                return
+            if route == "/market/chart":
+                symbol = str(query.get("symbol", [services.CHECK_SYMBOL])[0])
+                interval = str(query.get("interval", ["5m"])[0])
+                limit = int(query.get("limit", [200])[0])
+                self._send_json({"status": "ok", "chart": services.get_market_chart(symbol, interval=interval, limit=limit)})
+                return
+            if route == "/market/ticker":
+                symbol = str(query.get("symbol", [services.CHECK_SYMBOL])[0])
+                self._send_json({"status": "ok", "ticker": services.get_market_ticker(symbol)})
+                return
+            if route == "/autopilot/events":
+                limit = int(query.get("limit", [100])[0])
+                self._send_json({"status": "ok", "autopilot_events": services.get_autopilot_events(limit)})
                 return
             if route == "/live/history":
                 self._send_json({"status": "ok", "history": services.get_live_history()})
@@ -146,13 +178,18 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json({"status": "ok", "point": services.append_live_history(symbol, signal, probability_up), "history": services.get_live_history()})
                 return
             if route == "/trade/action":
+                block_latency_ms = int(payload.get("block_latency_ms", payload.get("max_api_latency_ms", 3000)))
                 result = services.execute_account_action(
                     action=str(payload.get("action", "")),
                     symbol=str(payload.get("symbol", services.CHECK_SYMBOL)),
                     quantity=float(payload.get("quantity", 0.0)),
                     quote_amount=float(payload.get("quote_amount", 0.0)),
                     dry_run=bool(payload.get("dry_run", True)),
-                    max_api_latency_ms=int(payload.get("max_api_latency_ms", 1200)),
+                    max_api_latency_ms=block_latency_ms,
+                    warning_latency_ms=int(payload.get("warning_latency_ms", int(block_latency_ms * 0.50))),
+                    degraded_latency_ms=int(payload.get("degraded_latency_ms", int(block_latency_ms * 0.75))),
+                    block_latency_ms=block_latency_ms,
+                    consecutive_breach_limit=int(payload.get("consecutive_breach_limit", 5)),
                     max_ticker_age_ms=int(payload.get("max_ticker_age_ms", 3000)),
                     max_spread_bps=float(payload.get("max_spread_bps", 20.0)),
                     min_trade_cooldown_seconds=int(payload.get("min_trade_cooldown_seconds", 5)),
@@ -160,16 +197,25 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json({"status": "ok", "result": result})
                 return
             if route == "/trade/preview":
+                block_latency_ms = int(payload.get("block_latency_ms", payload.get("max_api_latency_ms", 3000)))
                 result = services.preview_trade_action(
                     action=str(payload.get("action", "")),
                     symbol=str(payload.get("symbol", services.CHECK_SYMBOL)),
                     quantity=float(payload.get("quantity", 0.0)),
                     quote_amount=float(payload.get("quote_amount", 0.0)),
-                    max_api_latency_ms=int(payload.get("max_api_latency_ms", 1200)),
+                    max_api_latency_ms=block_latency_ms,
+                    warning_latency_ms=int(payload.get("warning_latency_ms", int(block_latency_ms * 0.50))),
+                    degraded_latency_ms=int(payload.get("degraded_latency_ms", int(block_latency_ms * 0.75))),
+                    block_latency_ms=block_latency_ms,
+                    consecutive_breach_limit=int(payload.get("consecutive_breach_limit", 5)),
                     max_ticker_age_ms=int(payload.get("max_ticker_age_ms", 3000)),
                     max_spread_bps=float(payload.get("max_spread_bps", 20.0)),
                     min_trade_cooldown_seconds=int(payload.get("min_trade_cooldown_seconds", 5)),
                 )
+                self._send_json({"status": "ok", "result": result})
+                return
+            if route == "/rebalance/execute":
+                result = services.execute_rebalance_orders(payload)
                 self._send_json({"status": "ok", "result": result})
                 return
             if route == "/support/chat":
@@ -184,6 +230,8 @@ class ApiHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    services.ensure_llm_startup_logged()
+    services.reconcile_interrupted_autopilot_state()
     with ThreadingHTTPServer((HOST, PORT), ApiHandler) as server:
         print(f"Backend API running at http://{HOST}:{PORT}")
         server.serve_forever()

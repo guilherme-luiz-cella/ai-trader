@@ -121,6 +121,14 @@ For local adapter training on your machine, use [README_LORA.md](README_LORA.md)
 
 If you want a deployable API endpoint for your live stack, run `python -m backend.app` from the repo root. It serves `/health`, `/signal`, `/dashboard`, and the trading control endpoints used by the React frontend.
 
+## Production Alpha Upgrade
+
+For a deeper production-grade AI/ML pipeline (multi-source fusion, advanced factors, walk-forward validation, ensemble + GRU + RL allocation, risk-aware backtesting, and model drift monitoring), run:
+
+- `python research/prod_alpha/run_prod_alpha.py`
+
+This writes baseline-vs-upgraded comparison artifacts to `research/artifacts/prod_alpha/`.
+
 ### Training Environment Variables
 
 - `FINNHUB_API_KEY`: required for data download.

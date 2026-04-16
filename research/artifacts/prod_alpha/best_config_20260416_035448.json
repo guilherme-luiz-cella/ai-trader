@@ -1,0 +1,28 @@
+{
+  "source": {
+    "generated_at_utc": "2026-04-16T03:54:48.026388+00:00",
+    "seed": 42,
+    "profile": "very-light-debug",
+    "trials": 1,
+    "parallel_workers": 1
+  },
+  "config": {
+    "min_confidence": 0.65896813311011,
+    "max_daily_turnover": 0.2648298851181773,
+    "signal_cooldown_steps": 5,
+    "blend_lookback": 47,
+    "max_position_weight": 0.17825320436629485,
+    "vol_scale_target": 0.058903005823654014,
+    "vol_scale_floor": 0.32834191059710593,
+    "vol_scale_ceiling": 1.2502450136938674,
+    "tabular_profile": "very-light-debug",
+    "random_seed": 42,
+    "cpu_thread_count": 12,
+    "sklearn_n_jobs": -1,
+    "gru_batch_size": 96,
+    "gru_auto_batch_size": true,
+    "max_cache_entries": 8,
+    "enable_cache": true,
+    "resource_monitoring": true
+  }
+}

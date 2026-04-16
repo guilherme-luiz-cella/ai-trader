@@ -33,9 +33,22 @@ else
 fi
 
 if [[ ! -f .env ]]; then
-  cp .env.example .env 2>/dev/null || true
-  echo "WARNING: .env missing. Create $APP_DIR/.env before starting services."
+  if [[ -f .env.oracle ]]; then
+    cp .env.oracle .env
+    echo "Using Oracle-specific env from .env.oracle"
+  elif [[ -f .env.oracle.example ]]; then
+    cp .env.oracle.example .env 2>/dev/null || true
+    echo "WARNING: .env missing. Seeded from .env.oracle.example. Review secrets before starting services."
+  else
+    cp .env.example .env 2>/dev/null || true
+    echo "WARNING: .env missing. Create $APP_DIR/.env before starting services."
+  fi
 fi
+
+mkdir -p research/runtime_memory
+
+echo "Validating Docker Compose config..."
+docker compose -f docker-compose.oracle.yml config >/dev/null
 
 docker compose -f docker-compose.oracle.yml up -d --build signal-api
 

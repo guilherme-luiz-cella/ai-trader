@@ -9,7 +9,6 @@ __pycache__
 .streamlit
 backtest
 implement
-deploy
 README.md
 run_dashboard_clean.sh
 runtime.txt

@@ -9,10 +9,11 @@ Environment variables:
 - BUY_THRESHOLD: default 0.55
 - SELL_THRESHOLD: default 0.45
 - LLM_ENABLED: set true to enable optional LLM overlay
-- LLM_PROVIDER: ollama (default), openai_compatible, or huggingface_inference
-- LLM_MODEL: default qwen2.5:7b-instruct
-- LLM_BASE_URL: default http://127.0.0.1:11434
+- PRIMARY_MODEL / PRIMARY_MODEL_PATH: the trained model to use for local AI
+- LLM_PROVIDER: runtime provider such as local_transformers, openai_compatible, ollama, or huggingface_inference
+- LLM_BASE_URL: runtime server base URL when using a server-based provider
 - LLM_API_KEY: API key for selected provider
+- ALLOW_MODEL_FALLBACK: set true to allow an explicit fallback model
 - LLM_MERGE_ENABLED: set true to merge LLM with ML probability
 - LLM_MERGE_WEIGHT: 0.0-0.5 weight assigned to LLM probability view
 - LLM_CONFIDENCE_FLOOR: minimum LLM confidence required for merge
@@ -33,18 +34,22 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any, Optional, Tuple
 
 import pandas as pd
-import requests
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parent
 load_dotenv(PROJECT_ROOT / ".env", override=False)
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 ARTIFACTS_DIR = BASE_DIR / "artifacts"
 DATA_DIR = BASE_DIR / "data_sets"
+
+from backend.llm_client import ensure_llm_startup_logged, get_llm_status, llm_chat
 
 MODEL_PATH = Path(os.getenv("MODEL_PATH", "")) if os.getenv("MODEL_PATH") else None
 _dataset_path_env = os.getenv("DATASET_PATH", "").strip()
@@ -52,18 +57,11 @@ DATASET_PATH = Path(_dataset_path_env) if _dataset_path_env else (DATA_DIR / "aa
 BUY_THRESHOLD = float(os.getenv("BUY_THRESHOLD", "0.55"))
 SELL_THRESHOLD = float(os.getenv("SELL_THRESHOLD", "0.45"))
 LLM_ENABLED = os.getenv("LLM_ENABLED", "false").lower() == "true"
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").lower()
-LLM_MODEL = os.getenv("LLM_MODEL", "qwen2.5:7b-instruct")
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
-LLM_API_KEY = os.getenv("LLM_API_KEY", "")
-LLM_LOCAL_MODEL_PATH = os.getenv("LLM_LOCAL_MODEL_PATH", "").strip()
 LLM_MERGE_ENABLED = os.getenv("LLM_MERGE_ENABLED", "false").lower() == "true"
 LLM_MERGE_WEIGHT = float(os.getenv("LLM_MERGE_WEIGHT", "0.20"))
 LLM_CONFIDENCE_FLOOR = float(os.getenv("LLM_CONFIDENCE_FLOOR", "0.55"))
 LLM_CONFIDENCE_SOFT_GATE = os.getenv("LLM_CONFIDENCE_SOFT_GATE", "true").lower() == "true"
 ADAPTIVE_THRESHOLD_ENABLED = os.getenv("ADAPTIVE_THRESHOLD_ENABLED", "true").lower() == "true"
-LLM_TIMEOUT_SECONDS = int(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
-LLM_BYPASS_ENV_PROXY = os.getenv("LLM_BYPASS_ENV_PROXY", "true").lower() == "true"
 VOLATILITY_REGIME_ENABLED = os.getenv("VOLATILITY_REGIME_ENABLED", "true").lower() == "true"
 VOLATILITY_LOOKBACK_ROWS = int(os.getenv("VOLATILITY_LOOKBACK_ROWS", "120"))
 VOLATILITY_LOW_PCT = float(os.getenv("VOLATILITY_LOW_PCT", "1.20"))
@@ -73,13 +71,11 @@ LLM_MERGE_WEIGHT_HIGH = float(os.getenv("LLM_MERGE_WEIGHT_HIGH", "0.35"))
 HIGH_REGIME_REQUIRE_LLM_CONFIRMATION = os.getenv("HIGH_REGIME_REQUIRE_LLM_CONFIRMATION", "true").lower() == "true"
 HIGH_REGIME_MIN_LLM_CONFIDENCE = float(os.getenv("HIGH_REGIME_MIN_LLM_CONFIDENCE", "0.60"))
 EXTREME_REGIME_FORCE_HOLD = os.getenv("EXTREME_REGIME_FORCE_HOLD", "true").lower() == "true"
-
-_LOCAL_MODEL_CACHE: dict[str, Any] = {
-    "path": "",
-    "tokenizer": None,
-    "model": None,
-}
-
+CONFIDENCE_MERGE_ENABLED = os.getenv("CONFIDENCE_MERGE_ENABLED", "true").lower() == "true"
+CONFIDENCE_MODEL_WEIGHT = float(os.getenv("CONFIDENCE_MODEL_WEIGHT", "0.50"))
+CONFIDENCE_LLM_WEIGHT = float(os.getenv("CONFIDENCE_LLM_WEIGHT", "0.30"))
+CONFIDENCE_DATA_WEIGHT = float(os.getenv("CONFIDENCE_DATA_WEIGHT", "0.20"))
+CONFIDENCE_AGREEMENT_BONUS = float(os.getenv("CONFIDENCE_AGREEMENT_BONUS", "0.10"))
 
 def latest_file_with_suffix(folder: Path, suffix: str) -> Optional[Path]:
     files = sorted(folder.glob(f"*{suffix}"), key=lambda path: path.stat().st_mtime)
@@ -107,22 +103,33 @@ def load_model(model_path: Path):
     return joblib.load(model_path)
 
 
-def load_latest_row(path: Path) -> Tuple[pd.DataFrame, pd.Series]:
+def load_latest_row(path: Path, model_feature_names: list[str] | None = None) -> Tuple[pd.DataFrame, pd.Series]:
     if not path.exists():
         raise FileNotFoundError(f"Dataset not found: {path}")
 
     data = pd.read_csv(path)
-    excluded_columns = {"timestamp", "date", "target"}
-    feature_columns = [
-        column
-        for column in data.columns
-        if column not in excluded_columns and pd.api.types.is_numeric_dtype(data[column])
-    ]
+    if data.empty:
+        raise ValueError("Dataset is empty; cannot generate signal.")
+
+    if model_feature_names:
+        feature_columns = [str(name) for name in model_feature_names]
+    else:
+        excluded_columns = {"timestamp", "date", "target"}
+        feature_columns = [
+            column
+            for column in data.columns
+            if column not in excluded_columns and pd.api.types.is_numeric_dtype(data[column])
+        ]
 
     if not feature_columns:
         raise ValueError("No numeric feature columns found in dataset")
 
-    latest_row = data.iloc[[-1]][feature_columns]
+    aligned = data.iloc[[-1]].copy()
+    for column in feature_columns:
+        if column not in aligned.columns:
+            aligned[column] = 0.0
+
+    latest_row = aligned[feature_columns].apply(pd.to_numeric, errors="coerce").fillna(0.0)
     return latest_row, data.iloc[-1]
 
 
@@ -136,19 +143,6 @@ def _row_preview(row: pd.Series, max_items: int = 20) -> dict[str, Any]:
             preview[str(key)] = float(value)
             count += 1
     return preview
-
-
-def _llm_endpoint() -> str:
-    if LLM_PROVIDER in {"deepseek", "openai_compatible"}:
-        return f"{LLM_BASE_URL}/chat/completions"
-    if LLM_PROVIDER == "ollama":
-        return f"{LLM_BASE_URL}/api/chat"
-    if LLM_PROVIDER == "local_transformers":
-        return "local://transformers"
-    if LLM_PROVIDER == "huggingface_inference":
-        base = LLM_BASE_URL if LLM_BASE_URL else "https://api-inference.huggingface.co"
-        return f"{base}/models/{LLM_MODEL}"
-    raise ValueError(f"Unsupported LLM_PROVIDER: {LLM_PROVIDER}")
 
 
 def _extract_json_object(text: str) -> dict[str, Any]:
@@ -170,105 +164,13 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     raise ValueError("LLM response did not contain valid JSON object.")
 
 
-def _resolve_local_model_path() -> Path:
-    if LLM_LOCAL_MODEL_PATH:
-        candidate = Path(LLM_LOCAL_MODEL_PATH)
-        if candidate.exists():
-            return candidate
-
-    latest_merged = latest_file_with_suffix(ARTIFACTS_DIR / "merged_models", "")
-    if latest_merged is not None and latest_merged.is_dir():
-        return latest_merged
-
-    raise FileNotFoundError(
-        "Local transformers model path not found. Set LLM_LOCAL_MODEL_PATH to a merged model directory."
-    )
-
-
-def _local_transformers_generate(system_prompt: str, user_content: str, max_new_tokens: int = 220) -> str:
-    try:
-        import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-    except ModuleNotFoundError as exc:
-        raise ModuleNotFoundError(
-            "Missing local transformers dependencies. Install transformers/torch/sentencepiece/safetensors."
-        ) from exc
-
-    model_path = str(_resolve_local_model_path())
-    if _LOCAL_MODEL_CACHE.get("path") != model_path:
-        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-
-        model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            trust_remote_code=True,
-            torch_dtype=(torch.float16 if torch.cuda.is_available() else torch.float32),
-        )
-        if torch.cuda.is_available():
-            model = model.to("cuda")
-        _LOCAL_MODEL_CACHE["path"] = model_path
-        _LOCAL_MODEL_CACHE["tokenizer"] = tokenizer
-        _LOCAL_MODEL_CACHE["model"] = model
-
-    tokenizer = _LOCAL_MODEL_CACHE["tokenizer"]
-    model = _LOCAL_MODEL_CACHE["model"]
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_content},
-    ]
-
-    if hasattr(tokenizer, "apply_chat_template"):
-        prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    else:
-        prompt = f"SYSTEM: {system_prompt}\nUSER: {user_content}\nASSISTANT:"
-
-    inputs = tokenizer(prompt, return_tensors="pt")
-    if hasattr(model, "device"):
-        inputs = {key: value.to(model.device) for key, value in inputs.items()}
-
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            temperature=0.2,
-            do_sample=True,
-            pad_token_id=tokenizer.eos_token_id,
-        )
-
-    generated = outputs[0][inputs["input_ids"].shape[1] :]
-    return tokenizer.decode(generated, skip_special_tokens=True)
-
-
-def _post_llm_request(endpoint: str, headers: dict[str, str], payload: dict[str, Any]) -> requests.Response:
-    try:
-        return requests.post(
-            endpoint,
-            headers=headers,
-            json=payload,
-            timeout=LLM_TIMEOUT_SECONDS,
-        )
-    except requests.exceptions.ProxyError:
-        if not LLM_BYPASS_ENV_PROXY:
-            raise
-
-    with requests.Session() as session:
-        session.trust_env = False
-        return session.post(
-            endpoint,
-            headers=headers,
-            json=payload,
-            timeout=LLM_TIMEOUT_SECONDS,
-        )
-
-
 def generate_llm_overlay(
     probability_up: float,
     buy_threshold: float,
     sell_threshold: float,
     latest_row: pd.Series,
 ) -> dict[str, Any]:
+    ensure_llm_startup_logged()
     if not LLM_ENABLED:
         return {
             "enabled": False,
@@ -276,18 +178,11 @@ def generate_llm_overlay(
             "message": "LLM overlay disabled.",
         }
 
-    if LLM_PROVIDER not in {"ollama", "local_transformers"} and not LLM_API_KEY:
-        return {
-            "enabled": True,
-            "status": "missing_api_key",
-            "provider": LLM_PROVIDER,
-            "message": "LLM_API_KEY missing; cannot run LLM overlay.",
-        }
-
     system_prompt = (
         "You are a risk-aware trading assistant. "
         "Given model probability and thresholds, output conservative recommendation. "
-        "Return strict JSON only with keys: llm_signal, confidence, rationale, risk_flags."
+        "Return strict JSON only with keys: llm_signal, confidence, rationale, risk_flags. "
+        "confidence MUST be a numeric float between 0 and 1 (example: 0.63), not a range and not text."
     )
     user_payload = {
         "probability_up": probability_up,
@@ -296,126 +191,56 @@ def generate_llm_overlay(
         "latest_row_preview": _row_preview(latest_row),
         "instructions": {
             "llm_signal": "BUY|SELL|HOLD",
-            "confidence": "0.0-1.0",
+            "confidence": "numeric float only (e.g. 0.63)",
             "rationale": "short plain-English reason",
             "risk_flags": ["array of short risk strings"],
         },
     }
 
     try:
-        headers = {
-            "Content-Type": "application/json",
-        }
-        if LLM_PROVIDER in {"deepseek", "openai_compatible", "huggingface_inference"}:
-            headers["Authorization"] = f"Bearer {LLM_API_KEY}"
-
-        if LLM_PROVIDER == "local_transformers":
-            content = _local_transformers_generate(
-                system_prompt=system_prompt,
-                user_content=json.dumps(user_payload),
-                max_new_tokens=220,
-            )
-            endpoint = _llm_endpoint()
-            parsed = _extract_json_object(content)
+        llm_response = llm_chat(
+            system_prompt=system_prompt,
+            user_content=json.dumps(user_payload),
+            max_new_tokens=220,
+            response_format={"type": "json_object"},
+        )
+        if llm_response.get("status") != "ok":
             return {
                 "enabled": True,
-                "status": "ok",
-                "provider": LLM_PROVIDER,
-                "model": str(_resolve_local_model_path()),
-                "endpoint": endpoint,
-                "llm_signal": str(parsed.get("llm_signal", "HOLD")).upper(),
-                "confidence": parse_confidence(parsed.get("confidence", 0.0)),
-                "rationale": str(parsed.get("rationale", "")),
-                "risk_flags": parsed.get("risk_flags", []),
+                "status": "error",
+                "provider": llm_response.get("provider"),
+                "model": llm_response.get("active_model") or llm_response.get("active_model_path"),
+                "message": str(llm_response.get("error") or "LLM overlay failed."),
+                "fallback_active": bool(llm_response.get("fallback_active", False)),
             }
 
-        if LLM_PROVIDER == "huggingface_inference":
-            hf_prompt = (
-                f"{system_prompt}\n"
-                "Output only JSON object with keys llm_signal, confidence, rationale, risk_flags.\n"
-                f"Input payload: {json.dumps(user_payload)}"
-            )
-            payload: dict[str, Any] = {
-                "inputs": hf_prompt,
-                "parameters": {
-                    "max_new_tokens": 200,
-                    "temperature": 0.2,
-                    "return_full_text": False,
-                },
-            }
-        elif LLM_PROVIDER == "ollama":
-            payload = {
-                "model": LLM_MODEL,
-                "stream": False,
-                "format": "json",
-                "options": {"temperature": 0.2},
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": json.dumps(user_payload)},
-                ],
-            }
-        else:
-            payload = {
-                "model": LLM_MODEL,
-                "temperature": 0.2,
-                "response_format": {"type": "json_object"},
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": json.dumps(user_payload)},
-                ],
-            }
-
-        endpoint = _llm_endpoint()
-        response = _post_llm_request(
-            endpoint=endpoint,
-            headers=headers,
-            payload=payload,
-        )
-        response.raise_for_status()
-        response_payload = response.json()
-        if LLM_PROVIDER == "huggingface_inference":
-            if isinstance(response_payload, list) and response_payload:
-                content = str(response_payload[0].get("generated_text", ""))
-            elif isinstance(response_payload, dict):
-                content = str(response_payload.get("generated_text", ""))
-            else:
-                content = str(response_payload)
-        elif LLM_PROVIDER == "ollama":
-            content = str(response_payload.get("message", {}).get("content", ""))
-        else:
-            content = response_payload["choices"][0]["message"]["content"]
-
+        content = str(llm_response.get("content", ""))
         parsed = _extract_json_object(content)
         return {
             "enabled": True,
             "status": "ok",
-            "provider": LLM_PROVIDER,
-            "model": LLM_MODEL,
-            "endpoint": endpoint,
+            "provider": llm_response.get("provider"),
+            "model": llm_response.get("active_model") or llm_response.get("active_model_path"),
+            "endpoint": llm_response.get("endpoint", ""),
+            "is_trained_model": bool(llm_response.get("is_trained_model", False)),
+            "fallback_active": bool(llm_response.get("fallback_active", False)),
             "llm_signal": str(parsed.get("llm_signal", "HOLD")).upper(),
-            "confidence": parse_confidence(parsed.get("confidence", 0.0)),
+            "confidence": parse_confidence(
+                parsed.get("confidence", 0.0),
+                llm_signal=str(parsed.get("llm_signal", "HOLD")),
+            ),
             "rationale": str(parsed.get("rationale", "")),
             "risk_flags": parsed.get("risk_flags", []),
         }
-    except requests.exceptions.ProxyError as exc:
-        return {
-            "enabled": True,
-            "status": "proxy_error",
-            "provider": LLM_PROVIDER,
-            "model": LLM_MODEL,
-            "message": (
-                "LLM request blocked by proxy tunnel. "
-                "Set LLM_BYPASS_ENV_PROXY=true (default) and verify network allows direct HTTPS to provider endpoint. "
-                f"Underlying error: {exc}"
-            ),
-        }
     except Exception as exc:
+        status = get_llm_status()
         return {
             "enabled": True,
             "status": "error",
-            "provider": LLM_PROVIDER,
-            "model": LLM_MODEL,
+            "provider": status.get("provider"),
+            "model": status.get("active_model") or status.get("active_model_path"),
             "message": str(exc),
+            "fallback_active": bool(status.get("fallback_active", False)),
         }
 
 
@@ -423,20 +248,37 @@ def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
-def parse_confidence(value: Any) -> float:
+def parse_confidence(value: Any, llm_signal: str = "HOLD") -> float:
     try:
         return clamp(float(value), 0.0, 1.0)
     except (TypeError, ValueError):
         pass
 
     text = str(value or "")
-    match = re.search(r"-?\d+(?:\.\d+)?", text)
-    if not match:
-        return 0.0
+    matches = re.findall(r"-?\d+(?:\.\d+)?", text)
+    if not matches:
+        return 0.60 if str(llm_signal).upper() in {"BUY", "SELL"} else 0.0
+
+    numeric_candidates: list[float] = []
+    for match in matches:
+        try:
+            numeric_candidates.append(float(match))
+        except ValueError:
+            continue
+
+    if not numeric_candidates:
+        return 0.60 if str(llm_signal).upper() in {"BUY", "SELL"} else 0.0
+
+    bounded = [item for item in numeric_candidates if 0.0 <= item <= 1.0]
+    if bounded:
+        if len(bounded) >= 2 and text.count("-") >= 1 and min(bounded) == 0.0 and max(bounded) == 1.0:
+            return 0.60 if str(llm_signal).upper() in {"BUY", "SELL"} else 0.0
+        return clamp(max(bounded), 0.0, 1.0)
+
     try:
-        return clamp(float(match.group(0)), 0.0, 1.0)
+        return clamp(float(numeric_candidates[0]), 0.0, 1.0)
     except ValueError:
-        return 0.0
+        return 0.60 if str(llm_signal).upper() in {"BUY", "SELL"} else 0.0
 
 
 def compute_recent_volatility_pct(dataset_path: Path, lookback_rows: int) -> float:
@@ -502,6 +344,7 @@ def merge_ml_llm_decision(
     sell_threshold: float,
     llm_overlay: dict[str, Any],
     market_regime: dict[str, Any],
+    data_confidence: float,
 ) -> dict[str, Any]:
     base = {
         "enabled": False,
@@ -529,6 +372,8 @@ def merge_ml_llm_decision(
     llm_prob_view = llm_signal_to_probability(str(llm_overlay.get("llm_signal", "HOLD")), llm_conf)
     regime = str(market_regime.get("regime", "disabled"))
     base_merge_weight = clamp(LLM_MERGE_WEIGHT, 0.0, 0.5)
+    data_boost = 0.70 + (0.60 * clamp(data_confidence, 0.0, 1.0))
+    base_merge_weight = clamp(base_merge_weight * data_boost, 0.0, 0.5)
     if market_regime.get("enabled"):
         if regime == "low":
             base_merge_weight = 0.0
@@ -587,7 +432,109 @@ def merge_ml_llm_decision(
         "llm_signal": str(llm_overlay.get("llm_signal", "HOLD")).upper(),
         "llm_confidence": float(llm_conf),
         "merged_signal": merged_signal,
+        "data_confidence": float(clamp(data_confidence, 0.0, 1.0)),
+        "data_boost": float(data_boost),
         "reason": reason,
+    }
+
+
+def compute_data_context_confidence(latest_row: pd.Series) -> float:
+    if "data_context_coverage" in latest_row.index:
+        try:
+            return clamp(float(latest_row.get("data_context_coverage", 0.0)), 0.0, 1.0)
+        except (TypeError, ValueError):
+            pass
+
+    contextual_columns = [
+        col
+        for col in latest_row.index
+        if str(col).startswith(("fred_", "gdelt_", "fng_", "cg_"))
+        or str(col) in {"news_count", "headline_score", "summary_score", "total_score", "unique_sources"}
+    ]
+    if not contextual_columns:
+        return 0.5
+
+    values: list[float] = []
+    for column in contextual_columns:
+        raw_value = latest_row.get(column)
+        if pd.isna(raw_value):
+            continue
+        try:
+            values.append(float(raw_value))
+        except (TypeError, ValueError):
+            continue
+
+    if not values:
+        return 0.0
+
+    nonnull_ratio = len(values) / max(1, len(contextual_columns))
+    nonzero_ratio = sum(abs(item) > 1e-12 for item in values) / len(values)
+    return clamp((0.5 * nonnull_ratio) + (0.5 * nonzero_ratio), 0.0, 1.0)
+
+
+def compute_model_confidence(probability_up: float, buy_threshold: float, sell_threshold: float) -> float:
+    probability = clamp(float(probability_up), 0.0, 1.0)
+    edge_from_mid = abs(probability - 0.5) * 2.0
+    nearest_boundary = min(abs(probability - buy_threshold), abs(probability - sell_threshold))
+    threshold_band = max(0.01, (buy_threshold - sell_threshold) / 2.0)
+    boundary_strength = clamp(nearest_boundary / threshold_band, 0.0, 1.0)
+    return clamp((0.6 * edge_from_mid) + (0.4 * boundary_strength), 0.0, 1.0)
+
+
+def normalize_confidence_weights() -> tuple[float, float, float]:
+    model_weight = max(0.0, float(CONFIDENCE_MODEL_WEIGHT))
+    llm_weight = max(0.0, float(CONFIDENCE_LLM_WEIGHT))
+    data_weight = max(0.0, float(CONFIDENCE_DATA_WEIGHT))
+    total = model_weight + llm_weight + data_weight
+    if total <= 0:
+        return 0.5, 0.3, 0.2
+    return model_weight / total, llm_weight / total, data_weight / total
+
+
+def compose_decision_confidence(
+    final_signal: str,
+    ml_signal: str,
+    final_probability_up: float,
+    buy_threshold: float,
+    sell_threshold: float,
+    llm_overlay: dict[str, Any],
+    data_confidence: float,
+) -> tuple[float, dict[str, Any]]:
+    model_confidence = compute_model_confidence(final_probability_up, buy_threshold, sell_threshold)
+    llm_confidence = 0.0
+    llm_signal = str(llm_overlay.get("llm_signal", "HOLD")).upper()
+    if llm_overlay.get("status") == "ok":
+        llm_confidence = clamp(float(llm_overlay.get("confidence", 0.0) or 0.0), 0.0, 1.0)
+
+    model_weight, llm_weight, data_weight = normalize_confidence_weights()
+    merged_confidence = (
+        (model_confidence * model_weight)
+        + (llm_confidence * llm_weight)
+        + (clamp(data_confidence, 0.0, 1.0) * data_weight)
+    )
+
+    if str(ml_signal).upper() == str(final_signal).upper() and llm_signal == str(final_signal).upper() and str(final_signal).upper() in {"BUY", "SELL"}:
+        merged_confidence += clamp(CONFIDENCE_AGREEMENT_BONUS, 0.0, 0.20)
+
+    if str(final_signal).upper() == "HOLD":
+        merged_confidence *= 0.90
+
+    merged_confidence = clamp(merged_confidence, 0.0, 1.0)
+    return merged_confidence, {
+        "enabled": CONFIDENCE_MERGE_ENABLED,
+        "model_confidence": model_confidence,
+        "llm_confidence": llm_confidence,
+        "data_confidence": clamp(data_confidence, 0.0, 1.0),
+        "weights": {
+            "model": model_weight,
+            "llm": llm_weight,
+            "data": data_weight,
+        },
+        "agreement_bonus": clamp(CONFIDENCE_AGREEMENT_BONUS, 0.0, 0.20),
+        "ml_signal": str(ml_signal).upper(),
+        "llm_signal": llm_signal,
+        "final_signal": str(final_signal).upper(),
+        "merged_confidence": merged_confidence,
     }
 
 
@@ -629,7 +576,8 @@ def generate_trade_decision(
     adaptive_threshold_enabled: bool,
 ) -> dict[str, Any]:
     model = load_model(model_path)
-    features, full_row = load_latest_row(dataset_path)
+    model_feature_names = list(getattr(model, "feature_names_in_", []))
+    features, full_row = load_latest_row(dataset_path, model_feature_names=model_feature_names or None)
 
     effective_buy_threshold = float(base_buy_threshold)
     effective_sell_threshold = float(base_sell_threshold)
@@ -668,12 +616,14 @@ def generate_trade_decision(
         sell_threshold=effective_sell_threshold,
         latest_row=full_row,
     )
+    data_confidence = compute_data_context_confidence(full_row)
     merge_result = merge_ml_llm_decision(
         ml_probability_up=probability,
         buy_threshold=effective_buy_threshold,
         sell_threshold=effective_sell_threshold,
         llm_overlay=llm_overlay,
         market_regime=market_regime,
+        data_confidence=data_confidence,
     )
 
     final_probability_up = float(merge_result.get("merged_probability_up", probability))
@@ -714,6 +664,22 @@ def generate_trade_decision(
                 "reason": "High volatility regime: ML and LLM disagree, forced HOLD.",
             }
 
+    decision_confidence = 0.0
+    confidence_breakdown: dict[str, Any] = {
+        "enabled": False,
+        "reason": "Confidence composer disabled.",
+    }
+    if CONFIDENCE_MERGE_ENABLED:
+        decision_confidence, confidence_breakdown = compose_decision_confidence(
+            final_signal=final_signal,
+            ml_signal=signal,
+            final_probability_up=final_probability_up,
+            buy_threshold=effective_buy_threshold,
+            sell_threshold=effective_sell_threshold,
+            llm_overlay=llm_overlay,
+            data_confidence=data_confidence,
+        )
+
     return {
         "signal": final_signal,
         "probability_up": final_probability_up,
@@ -726,6 +692,8 @@ def generate_trade_decision(
         "ml_probability_up": probability,
         "llm_overlay": llm_overlay,
         "llm_merge": merge_result,
+        "decision_confidence": decision_confidence,
+        "confidence_breakdown": confidence_breakdown,
         "safety_guard": safety_guard,
         "latest_timestamp": str(full_row.get("timestamp", "")),
     }

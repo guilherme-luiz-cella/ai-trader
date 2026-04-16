@@ -1,0 +1,265 @@
+{
+  "config": {
+    "assets": [
+      "BTC",
+      "ETH",
+      "SOL"
+    ],
+    "horizon": 3,
+    "fee_bps": 8.0,
+    "slippage_bps": 5.0,
+    "latency_steps": 1,
+    "min_confidence": 0.65896813311011,
+    "max_daily_turnover": 0.2648298851181773,
+    "signal_cooldown_steps": 5,
+    "blend_lookback": 47,
+    "max_position_weight": 0.17825320436629485,
+    "vol_scale_target": 0.058903005823654014,
+    "vol_scale_floor": 0.32834191059710593,
+    "vol_scale_ceiling": 1.2502450136938674,
+    "sklearn_n_jobs": -1,
+    "cpu_thread_count": 12,
+    "gru_batch_size": 96,
+    "gru_auto_batch_size": true,
+    "max_cache_entries": 8,
+    "resource_monitoring": true,
+    "tabular_profile": "very-light-debug",
+    "debug_mode": true,
+    "very_light_debug_mode": true,
+    "torch_device": "cuda"
+  },
+  "walk_forward_model_selection": {
+    "gru": 0.0,
+    "gb": -0.45395966108006125,
+    "rf": -0.6545112275192646,
+    "mlp": -1.230305854286579
+  },
+  "ensemble_weights": {
+    "gb": 0.0006968594423195857,
+    "rf": 0.967054542321635,
+    "mlp": 0.032248598236045284
+  },
+  "calibration": {
+    "temperature": 1.2
+  },
+  "feature_pruning": {
+    "kept": 38,
+    "dropped": [
+      "body_pct",
+      "close",
+      "fred_cpiaucsl_diff_30",
+      "fred_cpiaucsl_diff_7",
+      "fred_dff",
+      "fred_dff_diff_30",
+      "fred_dff_diff_7",
+      "fred_dgs10_diff_30",
+      "fred_unrate_diff_30",
+      "fred_unrate_diff_7",
+      "high",
+      "log_ret",
+      "low",
+      "news_count",
+      "news_score",
+      "regime_trend_down",
+      "sma_10",
+      "sma_30",
+      "spread_proxy",
+      "ulcer_20"
+    ]
+  },
+  "prediction_metrics": {
+    "upgraded_accuracy": 0.1695906432748538,
+    "upgraded_macro_f1": 0.09666666666666666,
+    "baseline_accuracy": 0.3216374269005848,
+    "baseline_macro_f1": 0.24508135542618303
+  },
+  "baseline_backtest": {
+    "sharpe": -0.7408471688887013,
+    "sortino": -1.2829866979047555,
+    "max_drawdown": -0.06824808738261157,
+    "win_loss_ratio": 0.5897435897435898,
+    "cagr": -0.100751682329695,
+    "total_return": -0.03070333626560584,
+    "avg_daily_return": -0.00038782112473964727,
+    "num_trades": 77,
+    "avg_turnover": 0.12359882663614738,
+    "max_turnover": 0.2648298851181773
+  },
+  "upgraded_backtest": {
+    "sharpe": -0.45070850681296926,
+    "sortino": -0.6848286949858756,
+    "max_drawdown": -0.1728447815363453,
+    "win_loss_ratio": 1.0555555555555556,
+    "cagr": -0.1827174865463056,
+    "total_return": -0.057528927873285673,
+    "avg_daily_return": -0.0005885835696022666,
+    "num_trades": 0,
+    "avg_turnover": 0.012234021573313849,
+    "max_turnover": 0.26
+  },
+  "blended_backtest": {
+    "sharpe": 0.1721343191970967,
+    "sortino": 0.27775686655992543,
+    "max_drawdown": -0.11349207759258073,
+    "win_loss_ratio": 0.8421052631578947,
+    "cagr": 0.009790626332554453,
+    "total_return": 0.002865138925403077,
+    "avg_daily_return": 0.00019175902915634903,
+    "num_trades": 0,
+    "avg_turnover": 0.012234021573313849,
+    "max_turnover": 0.26
+  },
+  "deployed_strategy": "meta_blend",
+  "deployed_backtest": {
+    "sharpe": 0.1721343191970967,
+    "sortino": 0.27775686655992543,
+    "max_drawdown": -0.11349207759258073,
+    "win_loss_ratio": 0.8421052631578947,
+    "cagr": 0.009790626332554453,
+    "total_return": 0.002865138925403077,
+    "avg_daily_return": 0.00019175902915634903,
+    "num_trades": 0,
+    "avg_turnover": 0.012234021573313849,
+    "max_turnover": 0.26
+  },
+  "diagnostics": {
+    "baseline": {
+      "action_counts": {
+        "BUY": 35,
+        "SELL": 32,
+        "STOP_LOSS": 7,
+        "TAKE_PROFIT": 3
+      },
+      "avg_hold_days": 2.5365853658536586,
+      "avg_trade_cost_rate": 0.001656892543757979,
+      "cost_drag_proxy": 0.1275807258693644
+    },
+    "upgraded": {
+      "action_counts": {},
+      "avg_hold_days": 0.0,
+      "avg_trade_cost_rate": 0.0,
+      "cost_drag_proxy": 0.0
+    }
+  },
+  "monitoring": {
+    "feature_drift_flags": {
+      "drifted_columns": [
+        "fng_value",
+        "fng_value_7d",
+        "fred_dgs10",
+        "fred_vixcls",
+        "fred_dgs10_diff_7",
+        "fred_vixcls_diff_7",
+        "benchmark_close",
+        "rolling_corr_benchmark_20",
+        "regime_trend_up"
+      ],
+      "total_columns": 38,
+      "drift_ratio": 0.23684210526315788
+    },
+    "performance_decay": {
+      "baseline_sharpe": -0.7408471688887013,
+      "upgraded_sharpe": -0.45070850681296926,
+      "delta_sharpe": 0.290138662075732,
+      "status": "improved"
+    },
+    "signal_filtering": {
+      "blocked_low_conf": 171,
+      "blocked_low_edge": 0,
+      "blocked_cooldown": 0,
+      "flip_count": 0
+    }
+  },
+  "runtime": {
+    "pipeline_stage_seconds": {
+      "prepare_inputs": 0.4808428999967873,
+      "walk_forward_model_selection": 10.694603600000846,
+      "holdout_training": 1.1107736000012665,
+      "backtesting": 1.9661155000030703,
+      "artifact_writing": 8.470000102533959e-05
+    },
+    "prep_cache_hits": {
+      "raw": false,
+      "features": false,
+      "splits": false
+    },
+    "prep_stage_seconds": {
+      "data_loading": 0.05623189999823808,
+      "feature_engineering": 0.4223844000007375,
+      "walk_forward_split_build": 0.0014298999994935002
+    },
+    "resource_detected": {
+      "platform": "Windows-11-10.0.26200-SP0",
+      "cpu_total_cores": 16,
+      "ram_total_gb": 31.103504180908203,
+      "ram_available_gb": 11.685523986816406,
+      "ram_percent_used": 62.4,
+      "gpu": {
+        "torch_cuda_available": true,
+        "torch_device_count": 1,
+        "selected_gpu": "NVIDIA GeForce RTX 3080 Ti",
+        "selected_index": 0,
+        "total_memory_gb": 11.99951171875,
+        "free_memory_gb": 10.80859375,
+        "nvidia_smi_detected": true,
+        "nvidia_smi_gpus": [
+          {
+            "index": 0,
+            "name": "NVIDIA GeForce RTX 3080 Ti",
+            "memory_total_mb": 12288.0,
+            "memory_free_mb": 9713.0,
+            "utilization_gpu_pct": 8.0
+          }
+        ]
+      }
+    },
+    "resource_effective": {
+      "requested_cpu_threads": 12,
+      "effective_cpu_threads_per_worker": 12,
+      "parallel_workers": 1,
+      "oversubscription_guard": "not_needed"
+    },
+    "tabular_profile": "very-light-debug",
+    "utilization_start": {
+      "cpu_percent": 5.2,
+      "ram_percent": 62.8,
+      "ram_used_gb": 19.540294647216797,
+      "gpu_index": 0,
+      "gpu_name": "NVIDIA GeForce RTX 3080 Ti",
+      "gpu_mem_used_gb": 1.19091796875,
+      "gpu_mem_total_gb": 11.99951171875,
+      "gpu_mem_used_pct": 9.924720244150558
+    },
+    "utilization_end": {
+      "cpu_percent": 4.5,
+      "ram_percent": 63.3,
+      "ram_used_gb": 19.697551727294922,
+      "gpu_index": 0,
+      "gpu_name": "NVIDIA GeForce RTX 3080 Ti",
+      "gpu_mem_used_gb": 1.32763671875,
+      "gpu_mem_total_gb": 11.99951171875,
+      "gpu_mem_used_pct": 11.064089521871821
+    },
+    "bound_status": "waiting_or_mixed",
+    "bound_classification": {
+      "gpu_bound": [
+        "GRU sequence training/inference"
+      ],
+      "cpu_bound": [
+        "sklearn model training",
+        "RL allocation",
+        "portfolio simulation"
+      ],
+      "io_bound": [
+        "CSV/context loading",
+        "artifact writing"
+      ]
+    },
+    "windows_high_priority_recommendation": "Start-Process -FilePath c:/Users/lastf/Desktop/ai-trader/.venv/Scripts/python.exe -ArgumentList 'run_prod_alpha_hyperopt.py --trials 20 --run-production' -Priority High",
+    "wsl2_vs_native_note": "WSL2/Linux container may improve scheduler and file I/O behavior for long sklearn-heavy runs; native Windows is typically best kept to sequential hyperopt workers unless trial count is large."
+  },
+  "artifacts": {
+    "predictions": "C:\\Users\\lastf\\Desktop\\ai-trader\\research\\artifacts\\prod_alpha\\skipped_in_very_light_debug.csv",
+    "trades": "C:\\Users\\lastf\\Desktop\\ai-trader\\research\\artifacts\\prod_alpha\\skipped_in_very_light_debug.json"
+  }
+}

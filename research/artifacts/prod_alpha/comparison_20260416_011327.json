@@ -1,0 +1,62 @@
+{
+  "config": {
+    "assets": [
+      "BTC",
+      "ETH",
+      "SOL"
+    ],
+    "horizon": 3,
+    "fee_bps": 8.0,
+    "slippage_bps": 5.0,
+    "latency_steps": 1
+  },
+  "walk_forward_model_selection": {
+    "gb": -0.09791107749193154,
+    "rf": -0.3343327808270619,
+    "mlp": -0.25954611064213745,
+    "gru": -0.024250884897869186
+  },
+  "prediction_metrics": {
+    "upgraded_accuracy": 0.43661971830985913,
+    "upgraded_macro_f1": 0.32161897473401385,
+    "baseline_accuracy": 0.38601982263954093,
+    "baseline_macro_f1": 0.3167207184719581
+  },
+  "baseline_backtest": {
+    "sharpe": -1.0070002721784581,
+    "sortino": -1.3426895719544993,
+    "max_drawdown": -0.5292348089474401,
+    "win_loss_ratio": 0.5129682997118156,
+    "cagr": -0.2334249153176834,
+    "total_return": -0.4994174271907611,
+    "avg_daily_return": -0.0009437617862783973,
+    "num_trades": 978
+  },
+  "upgraded_backtest": {
+    "sharpe": -2.216091264042983,
+    "sortino": -3.0321721732145703,
+    "max_drawdown": -0.8270524772950116,
+    "win_loss_ratio": 0.4610244988864143,
+    "cagr": -0.48493352149975943,
+    "total_return": -0.822200791169008,
+    "avg_daily_return": -0.002470982212629937,
+    "num_trades": 2301
+  },
+  "monitoring": {
+    "feature_drift_flags": {
+      "drifted_columns": [],
+      "total_columns": 58,
+      "drift_ratio": 0.0
+    },
+    "performance_decay": {
+      "baseline_sharpe": -1.0070002721784581,
+      "upgraded_sharpe": -2.216091264042983,
+      "delta_sharpe": -1.209090991864525,
+      "status": "degraded"
+    }
+  },
+  "artifacts": {
+    "predictions": "C:\\Users\\lastf\\Desktop\\ai-trader\\research\\artifacts\\prod_alpha\\predictions_20260416_011327.csv",
+    "trades": "C:\\Users\\lastf\\Desktop\\ai-trader\\research\\artifacts\\prod_alpha\\trades_20260416_011327.json"
+  }
+}
