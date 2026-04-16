@@ -25,3 +25,20 @@ c:/Users/lastf/Desktop/ai-trader/.venv/Scripts/python.exe research/train_lora_lo
 - Outputs are saved under `research/artifacts/lora_runs/lora_YYYYMMDD_HHMMSS/`.
 - Use `--use-4bit` only if `bitsandbytes` works in your environment.
 - This produces a LoRA adapter, not a fully merged model.
+
+## 4) Build a tuned Ollama model from adapter
+
+```powershell
+c:/Users/lastf/Desktop/ai-trader/.venv/Scripts/python.exe research/build_tuned_ollama_model.py
+```
+
+This will:
+
+- merge LoRA adapter + base model into `research/artifacts/merged_models/merged_*/`
+- run `ollama create ai-trader-tuned:<timestamp> -f Modelfile`
+
+Then set `LLM_MODEL` in `.env` to the created model name and restart Docker:
+
+```powershell
+docker compose up --build -d
+```

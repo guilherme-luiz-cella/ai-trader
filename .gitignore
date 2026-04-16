@@ -4,3 +4,10 @@ dist
 __pycache__
 *.pyc
 
+# Generated training outputs
+research/artifacts/lora_runs/
+research/artifacts/merged_models/
+
+# Python cache outputs inside repo
+research/__pycache__/
+

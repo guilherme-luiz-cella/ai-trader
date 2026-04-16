@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 RESEARCH_DIR = PROJECT_ROOT / "research"
-load_dotenv(PROJECT_ROOT / ".env", override=True)
+load_dotenv(PROJECT_ROOT / ".env", override=False)
 
 import sys
 
@@ -30,9 +30,12 @@ from generate_trade_signal import (  # noqa: E402
     LLM_BASE_URL,
     LLM_BYPASS_ENV_PROXY,
     LLM_ENABLED,
+    LLM_LOCAL_MODEL_PATH,
     LLM_MODEL,
     LLM_PROVIDER,
     LLM_TIMEOUT_SECONDS,
+    _local_transformers_generate,
+    _resolve_local_model_path,
     SELL_THRESHOLD,
     generate_trade_decision,
     load_latest_row,
@@ -53,7 +56,8 @@ BINANCE_BYPASS_ENV_PROXY = os.getenv("BINANCE_BYPASS_ENV_PROXY", "true").lower()
 BINANCE_TIMEOUT_SECONDS = int(os.getenv("BINANCE_TIMEOUT_SECONDS", "30"))
 CHECK_SYMBOL = os.getenv("CHECK_SYMBOL", "BTC/USDT")
 ACCOUNT_REFERENCE_USD = float(os.getenv("ACCOUNT_REFERENCE_USD", "6.93"))
-FRED_API_KEY = os.getenv("FRED_API_KEY", "").strip()
+SIZE_MIN_CONFIDENCE = float(os.getenv("SIZE_MIN_CONFIDENCE", "0.05"))
+FRED_API_KEY = os.getenv("FRED_API_KEY", os.getenv("FRED", "")).strip()
 FRED_BASE_URL = os.getenv("FRED_BASE_URL", "https://api.stlouisfed.org/fred").rstrip("/")
 FRED_TIMEOUT_SECONDS = int(os.getenv("FRED_TIMEOUT_SECONDS", "20"))
 FRED_BYPASS_ENV_PROXY = os.getenv("FRED_BYPASS_ENV_PROXY", "true").lower() == "true"
@@ -924,11 +928,29 @@ def auto_order_size_from_confidence(
     probability_up: float,
     market_price: float,
     max_trade_size_quote: float,
-    min_confidence: float = 0.10,
+    min_confidence: float = SIZE_MIN_CONFIDENCE,
 ) -> dict[str, float | str]:
+    normalized_signal = str(signal).upper()
+    if normalized_signal not in {"BUY", "SELL"}:
+        return {
+            "status": "hold_signal",
+            "strength": 0.0,
+            "quote_size": 0.0,
+            "base_size": 0.0,
+            "allocation_pct": 0.0,
+            "message": "Signal is HOLD, so no position size is allocated.",
+        }
+
     strength = confidence_strength(signal, probability_up)
     if strength < min_confidence or market_price <= 0 or max_trade_size_quote <= 0:
-        return {"status": "blocked", "strength": strength, "quote_size": 0.0, "base_size": 0.0, "allocation_pct": 0.0}
+        return {
+            "status": "blocked",
+            "strength": strength,
+            "quote_size": 0.0,
+            "base_size": 0.0,
+            "allocation_pct": 0.0,
+            "message": "Confidence, price, or max trade size is too low for allocation.",
+        }
     allocation_pct = 0.20 + (0.80 * strength)
     quote_size = max_trade_size_quote * allocation_pct
     base_size = quote_size / market_price
@@ -955,13 +977,32 @@ def estimate_cycles_to_goal(
     goal_profit = max(0.0, goal_value - current_value)
     if goal_profit <= 0:
         return {"status": "goal_already_reached", "goal_profit": 0.0, "expected_profit_per_cycle": 0.0, "expected_return_per_cycle": 0.0, "recommended_cycles": 0, "win_probability": 0.5}
+    normalized_signal = str(signal).upper()
+    if normalized_signal not in {"BUY", "SELL"}:
+        return {
+            "status": "hold_signal",
+            "goal_profit": goal_profit,
+            "expected_profit_per_cycle": 0.0,
+            "expected_return_per_cycle": 0.0,
+            "recommended_cycles": 0,
+            "win_probability": 0.5,
+            "message": "Signal is HOLD, so cycle planning is paused until BUY/SELL appears.",
+        }
     notional = max(0.0, order_size * market_price)
     if notional <= 0:
-        return {"status": "invalid_order_notional", "goal_profit": goal_profit, "expected_profit_per_cycle": 0.0, "expected_return_per_cycle": 0.0, "recommended_cycles": 0, "win_probability": 0.5}
+        return {
+            "status": "invalid_order_notional",
+            "goal_profit": goal_profit,
+            "expected_profit_per_cycle": 0.0,
+            "expected_return_per_cycle": 0.0,
+            "recommended_cycles": 0,
+            "win_probability": 0.5,
+            "message": "Order notional is zero; increase size or wait for stronger signal.",
+        }
     prob_up = clamp_value(float(probability_up), 0.0, 1.0)
-    if str(signal).upper() == "BUY":
+    if normalized_signal == "BUY":
         win_probability = prob_up
-    elif str(signal).upper() == "SELL":
+    elif normalized_signal == "SELL":
         win_probability = 1.0 - prob_up
     else:
         win_probability = 0.5
@@ -990,12 +1031,14 @@ def estimate_cycles_to_goal(
 def llm_support_chat(message: str, context: dict[str, Any]) -> dict[str, Any]:
     if not LLM_ENABLED:
         return {"status": "disabled", "answer": "LLM is disabled. Enable LLM_ENABLED=true in environment."}
-    if LLM_PROVIDER != "ollama" and not LLM_API_KEY:
+    if LLM_PROVIDER not in {"ollama", "local_transformers"} and not LLM_API_KEY:
         return {"status": "missing_api_key", "answer": "LLM_API_KEY is missing."}
     if LLM_PROVIDER in {"deepseek", "openai_compatible"}:
         endpoint = f"{LLM_BASE_URL.rstrip('/')}/chat/completions"
     elif LLM_PROVIDER == "ollama":
         endpoint = f"{LLM_BASE_URL.rstrip('/')}/api/chat"
+    elif LLM_PROVIDER == "local_transformers":
+        endpoint = "local://transformers"
     elif LLM_PROVIDER == "huggingface_inference":
         endpoint = f"{LLM_BASE_URL.rstrip('/')}/models/{LLM_MODEL}"
     else:
@@ -1010,6 +1053,19 @@ def llm_support_chat(message: str, context: dict[str, Any]) -> dict[str, Any]:
     if LLM_PROVIDER in {"deepseek", "openai_compatible", "huggingface_inference"}:
         headers["Authorization"] = f"Bearer {LLM_API_KEY}"
     try:
+        if LLM_PROVIDER == "local_transformers":
+            local_model = LLM_LOCAL_MODEL_PATH or str(_resolve_local_model_path())
+            answer = _local_transformers_generate(system_prompt=system_prompt, user_content=user_prompt, max_new_tokens=300)
+            if not answer.strip():
+                answer = "No response content from local transformers model."
+            return {
+                "status": "ok",
+                "answer": answer,
+                "endpoint": endpoint,
+                "provider": LLM_PROVIDER,
+                "model": local_model,
+            }
+
         if LLM_PROVIDER == "huggingface_inference":
             payload: dict[str, Any] = {
                 "inputs": f"{system_prompt}\n{user_prompt}",
@@ -1108,6 +1164,7 @@ def get_dashboard_payload(config: dict[str, Any] | None = None) -> dict[str, Any
         "market_scan_enabled": bool((config or {}).get("market_scan_enabled", True)),
         "market_scan_max_symbols": int((config or {}).get("market_scan_max_symbols", 60)),
         "market_scan_quote_asset": str((config or {}).get("market_scan_quote_asset", "USDT")),
+        "size_min_confidence": float((config or {}).get("size_min_confidence", SIZE_MIN_CONFIDENCE)),
     }
     decision_payload = get_decision_payload(
         buy_threshold=cfg["buy_threshold"],
@@ -1156,6 +1213,7 @@ def get_dashboard_payload(config: dict[str, Any] | None = None) -> dict[str, Any
         probability_up=float(decision.get("probability_up", 0.5)),
         market_price=float(market_price),
         max_trade_size_quote=float(plan["max_trade_size"]),
+        min_confidence=float(cfg["size_min_confidence"]),
     )
     cycle_plan = estimate_cycles_to_goal(
         current_value=float((wallet_snapshot or {}).get("estimated_total_usdt", plan["deposit_amount"])),
@@ -1311,6 +1369,7 @@ def run_autopilot(config: dict[str, Any]) -> None:
                     probability_up=probability_up,
                     market_price=float(snapshot.get("best_ask") or snapshot.get("best_bid") or get_market_price(symbol)),
                     max_trade_size_quote=float(config.get("max_trade_size_quote", 0.0)),
+                    min_confidence=float(config.get("size_min_confidence", SIZE_MIN_CONFIDENCE)),
                 )
                 order_size = float(size_plan.get("base_size", 0.0))
             append_live_history(symbol, signal, probability_up)

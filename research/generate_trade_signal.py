@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Optional, Tuple
 
@@ -41,7 +42,7 @@ from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parent
-load_dotenv(PROJECT_ROOT / ".env", override=True)
+load_dotenv(PROJECT_ROOT / ".env", override=False)
 ARTIFACTS_DIR = BASE_DIR / "artifacts"
 DATA_DIR = BASE_DIR / "data_sets"
 
@@ -55,6 +56,7 @@ LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").lower()
 LLM_MODEL = os.getenv("LLM_MODEL", "qwen2.5:7b-instruct")
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "")
+LLM_LOCAL_MODEL_PATH = os.getenv("LLM_LOCAL_MODEL_PATH", "").strip()
 LLM_MERGE_ENABLED = os.getenv("LLM_MERGE_ENABLED", "false").lower() == "true"
 LLM_MERGE_WEIGHT = float(os.getenv("LLM_MERGE_WEIGHT", "0.20"))
 LLM_CONFIDENCE_FLOOR = float(os.getenv("LLM_CONFIDENCE_FLOOR", "0.55"))
@@ -71,6 +73,12 @@ LLM_MERGE_WEIGHT_HIGH = float(os.getenv("LLM_MERGE_WEIGHT_HIGH", "0.35"))
 HIGH_REGIME_REQUIRE_LLM_CONFIRMATION = os.getenv("HIGH_REGIME_REQUIRE_LLM_CONFIRMATION", "true").lower() == "true"
 HIGH_REGIME_MIN_LLM_CONFIDENCE = float(os.getenv("HIGH_REGIME_MIN_LLM_CONFIDENCE", "0.60"))
 EXTREME_REGIME_FORCE_HOLD = os.getenv("EXTREME_REGIME_FORCE_HOLD", "true").lower() == "true"
+
+_LOCAL_MODEL_CACHE: dict[str, Any] = {
+    "path": "",
+    "tokenizer": None,
+    "model": None,
+}
 
 
 def latest_file_with_suffix(folder: Path, suffix: str) -> Optional[Path]:
@@ -135,6 +143,8 @@ def _llm_endpoint() -> str:
         return f"{LLM_BASE_URL}/chat/completions"
     if LLM_PROVIDER == "ollama":
         return f"{LLM_BASE_URL}/api/chat"
+    if LLM_PROVIDER == "local_transformers":
+        return "local://transformers"
     if LLM_PROVIDER == "huggingface_inference":
         base = LLM_BASE_URL if LLM_BASE_URL else "https://api-inference.huggingface.co"
         return f"{base}/models/{LLM_MODEL}"
@@ -158,6 +168,77 @@ def _extract_json_object(text: str) -> dict[str, Any]:
         return json.loads(candidate)
 
     raise ValueError("LLM response did not contain valid JSON object.")
+
+
+def _resolve_local_model_path() -> Path:
+    if LLM_LOCAL_MODEL_PATH:
+        candidate = Path(LLM_LOCAL_MODEL_PATH)
+        if candidate.exists():
+            return candidate
+
+    latest_merged = latest_file_with_suffix(ARTIFACTS_DIR / "merged_models", "")
+    if latest_merged is not None and latest_merged.is_dir():
+        return latest_merged
+
+    raise FileNotFoundError(
+        "Local transformers model path not found. Set LLM_LOCAL_MODEL_PATH to a merged model directory."
+    )
+
+
+def _local_transformers_generate(system_prompt: str, user_content: str, max_new_tokens: int = 220) -> str:
+    try:
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "Missing local transformers dependencies. Install transformers/torch/sentencepiece/safetensors."
+        ) from exc
+
+    model_path = str(_resolve_local_model_path())
+    if _LOCAL_MODEL_CACHE.get("path") != model_path:
+        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            trust_remote_code=True,
+            torch_dtype=(torch.float16 if torch.cuda.is_available() else torch.float32),
+        )
+        if torch.cuda.is_available():
+            model = model.to("cuda")
+        _LOCAL_MODEL_CACHE["path"] = model_path
+        _LOCAL_MODEL_CACHE["tokenizer"] = tokenizer
+        _LOCAL_MODEL_CACHE["model"] = model
+
+    tokenizer = _LOCAL_MODEL_CACHE["tokenizer"]
+    model = _LOCAL_MODEL_CACHE["model"]
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_content},
+    ]
+
+    if hasattr(tokenizer, "apply_chat_template"):
+        prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    else:
+        prompt = f"SYSTEM: {system_prompt}\nUSER: {user_content}\nASSISTANT:"
+
+    inputs = tokenizer(prompt, return_tensors="pt")
+    if hasattr(model, "device"):
+        inputs = {key: value.to(model.device) for key, value in inputs.items()}
+
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            temperature=0.2,
+            do_sample=True,
+            pad_token_id=tokenizer.eos_token_id,
+        )
+
+    generated = outputs[0][inputs["input_ids"].shape[1] :]
+    return tokenizer.decode(generated, skip_special_tokens=True)
 
 
 def _post_llm_request(endpoint: str, headers: dict[str, str], payload: dict[str, Any]) -> requests.Response:
@@ -195,7 +276,7 @@ def generate_llm_overlay(
             "message": "LLM overlay disabled.",
         }
 
-    if LLM_PROVIDER != "ollama" and not LLM_API_KEY:
+    if LLM_PROVIDER not in {"ollama", "local_transformers"} and not LLM_API_KEY:
         return {
             "enabled": True,
             "status": "missing_api_key",
@@ -227,6 +308,26 @@ def generate_llm_overlay(
         }
         if LLM_PROVIDER in {"deepseek", "openai_compatible", "huggingface_inference"}:
             headers["Authorization"] = f"Bearer {LLM_API_KEY}"
+
+        if LLM_PROVIDER == "local_transformers":
+            content = _local_transformers_generate(
+                system_prompt=system_prompt,
+                user_content=json.dumps(user_payload),
+                max_new_tokens=220,
+            )
+            endpoint = _llm_endpoint()
+            parsed = _extract_json_object(content)
+            return {
+                "enabled": True,
+                "status": "ok",
+                "provider": LLM_PROVIDER,
+                "model": str(_resolve_local_model_path()),
+                "endpoint": endpoint,
+                "llm_signal": str(parsed.get("llm_signal", "HOLD")).upper(),
+                "confidence": parse_confidence(parsed.get("confidence", 0.0)),
+                "rationale": str(parsed.get("rationale", "")),
+                "risk_flags": parsed.get("risk_flags", []),
+            }
 
         if LLM_PROVIDER == "huggingface_inference":
             hf_prompt = (
@@ -292,7 +393,7 @@ def generate_llm_overlay(
             "model": LLM_MODEL,
             "endpoint": endpoint,
             "llm_signal": str(parsed.get("llm_signal", "HOLD")).upper(),
-            "confidence": float(parsed.get("confidence", 0.0) or 0.0),
+            "confidence": parse_confidence(parsed.get("confidence", 0.0)),
             "rationale": str(parsed.get("rationale", "")),
             "risk_flags": parsed.get("risk_flags", []),
         }
@@ -320,6 +421,22 @@ def generate_llm_overlay(
 
 def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
+
+
+def parse_confidence(value: Any) -> float:
+    try:
+        return clamp(float(value), 0.0, 1.0)
+    except (TypeError, ValueError):
+        pass
+
+    text = str(value or "")
+    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    if not match:
+        return 0.0
+    try:
+        return clamp(float(match.group(0)), 0.0, 1.0)
+    except ValueError:
+        return 0.0
 
 
 def compute_recent_volatility_pct(dataset_path: Path, lookback_rows: int) -> float:

@@ -55,7 +55,7 @@ DATA_LOOKBACK_DAYS = int(os.getenv("DATA_LOOKBACK_DAYS", "730"))
 TARGET_HORIZON = int(os.getenv("TARGET_HORIZON", "1"))
 TARGET_RETURN_THRESHOLD = float(os.getenv("TARGET_RETURN_THRESHOLD", "0.003"))
 TARGET_DOWNSIDE_THRESHOLD = float(os.getenv("TARGET_DOWNSIDE_THRESHOLD", "-0.003"))
-FRED_API_KEY = os.getenv("FRED_API_KEY", "").strip()
+FRED_API_KEY = os.getenv("FRED_API_KEY", os.getenv("FRED", "")).strip()
 FRED_BASE_URL = os.getenv("FRED_BASE_URL", "https://api.stlouisfed.org/fred").rstrip("/")
 FRED_TIMEOUT_SECONDS = int(os.getenv("FRED_TIMEOUT_SECONDS", "20"))
 FRED_BYPASS_ENV_PROXY = os.getenv("FRED_BYPASS_ENV_PROXY", "true").lower() == "true"

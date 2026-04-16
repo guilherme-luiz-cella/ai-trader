@@ -101,6 +101,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                     "max_daily_loss_pct": float(query.get("max_daily_loss_pct", [0.05])[0]),
                     "max_drawdown_pct": float(query.get("max_drawdown_pct", [0.15])[0]),
                     "withdrawal_target_pct": float(query.get("withdrawal_target_pct", [0.25])[0]),
+                    "size_min_confidence": float(query.get("size_min_confidence", [services.SIZE_MIN_CONFIDENCE])[0]),
                     "live_symbol": str(query.get("live_symbol", [services.CHECK_SYMBOL])[0]),
                     "market_scan_enabled": str(query.get("market_scan_enabled", ["true"])[0]).lower() in {"1", "true", "yes", "on"},
                     "market_scan_max_symbols": int(query.get("market_scan_max_symbols", [60])[0]),
