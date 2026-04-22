@@ -31,12 +31,29 @@ _STARTUP_VALIDATION: dict[str, Any] = {
     "model_load_error": "",
 }
 
+_DEFAULT_BASE_URLS = {
+    "ollama": "http://127.0.0.1:11434",
+    "groq": "https://api.groq.com/openai/v1",
+    "deepseek": "https://api.deepseek.com",
+    "huggingface_inference": "https://api-inference.huggingface.co",
+}
+
 
 def _env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_provider_and_base_url(provider: str, base_url: str) -> tuple[str, str]:
+    normalized_provider = (provider or "").strip().lower() or "local_transformers"
+    normalized_base_url = (base_url or "").strip().rstrip("/")
+    if not normalized_base_url:
+        normalized_base_url = _DEFAULT_BASE_URLS.get(normalized_provider, "")
+    elif normalized_provider == "groq" and normalized_base_url == _DEFAULT_BASE_URLS["ollama"]:
+        normalized_base_url = _DEFAULT_BASE_URLS["groq"]
+    return normalized_provider, normalized_base_url
 
 
 def _latest_merged_model_dir() -> Path | None:
@@ -64,18 +81,19 @@ def _normalize_model_path(raw_path: str) -> Path:
 
 
 def get_llm_runtime_config() -> dict[str, Any]:
-    provider = os.getenv("LLM_PROVIDER", "local_transformers").strip().lower() or "local_transformers"
+    provider = os.getenv("LLM_PROVIDER", "local_transformers")
     primary_model = os.getenv("PRIMARY_MODEL", os.getenv("LLM_MODEL", "")).strip()
     primary_model_path = os.getenv("PRIMARY_MODEL_PATH", os.getenv("LLM_LOCAL_MODEL_PATH", "")).strip()
     allow_fallback = _env_bool("ALLOW_MODEL_FALLBACK", False)
     fallback_model = os.getenv("FALLBACK_MODEL", "").strip()
     fallback_model_path = os.getenv("FALLBACK_MODEL_PATH", "").strip()
     timeout_seconds = int(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
-    base_url = os.getenv("LLM_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
+    base_url = os.getenv("LLM_BASE_URL", "")
     api_key = os.getenv("LLM_API_KEY", "").strip()
     bypass_proxy = _env_bool("LLM_BYPASS_ENV_PROXY", True)
     llm_enabled = _env_bool("LLM_ENABLED", False)
     explicit_trained = _env_bool("PRIMARY_MODEL_IS_TRAINED", True)
+    provider, base_url = _normalize_provider_and_base_url(provider, base_url)
     return {
         "enabled": llm_enabled,
         "provider": provider,
@@ -319,7 +337,7 @@ def llm_chat(system_prompt: str, user_content: str, max_new_tokens: int = 300, r
             return result
 
     headers = {"Content-Type": "application/json"}
-    if provider in {"openai_compatible", "deepseek", "huggingface_inference"} and str(config.get("api_key") or ""):
+    if provider in {"openai_compatible", "deepseek", "groq", "huggingface_inference"} and str(config.get("api_key") or ""):
         headers["Authorization"] = f"Bearer {config['api_key']}"
 
     if provider == "ollama":
@@ -335,7 +353,7 @@ def llm_chat(system_prompt: str, user_content: str, max_new_tokens: int = 300, r
         }
         if response_format:
             payload["format"] = "json"
-    elif provider in {"openai_compatible", "deepseek"}:
+    elif provider in {"openai_compatible", "deepseek", "groq"}:
         endpoint = f"{str(config.get('base_url') or '').rstrip('/')}/chat/completions"
         payload = {
             "model": model_target["model"],

@@ -7,7 +7,6 @@ __pycache__
 *.pyd
 *.log
 .streamlit
-backtest
 implement
 README.md
 run_dashboard_clean.sh

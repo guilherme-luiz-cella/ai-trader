@@ -9,6 +9,7 @@ COPY requirements-api.txt ./
 RUN pip install --no-cache-dir -r requirements-api.txt
 
 COPY backend ./backend
+COPY backtest ./backtest
 COPY research ./research
 
 EXPOSE 8765

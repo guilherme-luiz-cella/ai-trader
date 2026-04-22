@@ -48,6 +48,7 @@ DATA_DIR = RESEARCH_DIR / "data_sets"
 MEMORY_DIR = RESEARCH_DIR / "runtime_memory"
 MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 TRADE_MEMORY_PATH = MEMORY_DIR / "trade_memory.jsonl"
+PAPER_TRADE_FEEDBACK_PATH = MEMORY_DIR / "paper_trade_feedback.jsonl"
 AUTOPILOT_STATE_PATH = MEMORY_DIR / "autopilot_state.json"
 AUTOPILOT_EXECUTION_JOURNAL_PATH = MEMORY_DIR / "autopilot_execution_journal.jsonl"
 AUTOPILOT_RUN_SUMMARY_PATH = MEMORY_DIR / "autopilot_run_summaries.jsonl"
@@ -61,6 +62,10 @@ CHECK_SYMBOL = os.getenv("CHECK_SYMBOL", "BTC/USDT")
 ACCOUNT_REFERENCE_USD = float(os.getenv("ACCOUNT_REFERENCE_USD", "6.93"))
 SIZE_MIN_CONFIDENCE = float(os.getenv("SIZE_MIN_CONFIDENCE", "0.05"))
 DECISION_MIN_CONFIDENCE = float(os.getenv("DECISION_MIN_CONFIDENCE", "0.55"))
+LIVE_AUTOPILOT_MIN_DECISION_CONFIDENCE = max(
+    DECISION_MIN_CONFIDENCE,
+    float(os.getenv("LIVE_AUTOPILOT_MIN_DECISION_CONFIDENCE", "0.60")),
+)
 TARGET_MONITOR_SYMBOLS_RAW = os.getenv("TARGET_MONITOR_SYMBOLS", "BTC/USDT,ETH/USDT,SOL/USDT")
 TARGET_MONITOR_MAX_ASSETS = int(os.getenv("TARGET_MONITOR_MAX_ASSETS", "3"))
 TARGET_PRICE_MAP_RAW = os.getenv("TARGET_PRICE_MAP", "")
@@ -97,6 +102,9 @@ AUTOPILOT_UNATTENDED_MAX_RECONCILIATION_INCIDENTS = max(0, int(os.getenv("AUTOPI
 AUTOPILOT_IDEMPOTENCY_WINDOW_SECONDS = max(60, int(os.getenv("AUTOPILOT_IDEMPOTENCY_WINDOW_SECONDS", "900")))
 AUTOPILOT_BURNIN_MAX_ERROR_RATE = max(0.0, float(os.getenv("AUTOPILOT_BURNIN_MAX_ERROR_RATE", "0.10")))
 AUTOPILOT_BURNIN_MIN_FINALIZATION_SUCCESS_RATE = max(0.0, float(os.getenv("AUTOPILOT_BURNIN_MIN_FINALIZATION_SUCCESS_RATE", "1.00")))
+PAPER_TRADE_MIN_AGE_SECONDS = max(60, int(os.getenv("PAPER_TRADE_MIN_AGE_SECONDS", "300")))
+PAPER_TRADE_PROFIT_THRESHOLD_PCT = max(0.0, float(os.getenv("PAPER_TRADE_PROFIT_THRESHOLD_PCT", "0.20")))
+LIVE_AUTOPILOT_MIN_PAPER_FEEDBACK_ROWS = max(0, int(os.getenv("LIVE_AUTOPILOT_MIN_PAPER_FEEDBACK_ROWS", "5")))
 
 
 def parse_symbol_list(raw: str) -> list[str]:
@@ -256,7 +264,7 @@ def utc_now_iso() -> str:
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path = path.with_suffix(path.suffix + f".{uuid.uuid4().hex}.tmp")
     tmp_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
     tmp_path.replace(path)
 
@@ -859,6 +867,58 @@ def unattended_start_gate(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def build_live_start_validation_report(config: dict[str, Any] | None = None) -> dict[str, Any]:
+    cfg = dict(config or {})
+    burn_in_report = build_burn_in_validation_report()
+    paper_feedback = summarize_paper_trade_feedback_rows(load_paper_trade_feedback(limit=500), recent_limit=50)
+    decision_floor = float(cfg.get("decision_min_confidence", DECISION_MIN_CONFIDENCE))
+    alerting_configured = bool(
+        (cfg.get("alert_webhook_url", AUTOPILOT_ALERT_WEBHOOK_URL) and cfg.get("alerting_enabled", AUTOPILOT_ALERTING_ENABLED))
+        or AUTOPILOT_PAGERDUTY_ROUTING_KEY
+        or (AUTOPILOT_TWILIO_ACCOUNT_SID and AUTOPILOT_TWILIO_AUTH_TOKEN and AUTOPILOT_TWILIO_FROM_NUMBER and AUTOPILOT_TWILIO_TO_NUMBER)
+    )
+    checks = {
+        "reconciliation_clean": str(AUTOPILOT_STATE.get("reconciliation_state") or "clean") == "clean" and not bool(AUTOPILOT_STATE.get("requires_human_review", False)),
+        "persistence_ready": MEMORY_DIR.exists(),
+        "preview_gate_passed": bool(cfg.get("preview_gate_passed", False)),
+        "risk_guards_present": all(
+            cfg.get(field) is not None
+            for field in (
+                "decision_min_confidence",
+                "max_api_latency_ms",
+                "max_ticker_age_ms",
+                "max_spread_bps",
+                "max_failed_cycles_in_row",
+                "max_runtime_minutes",
+            )
+        ),
+        "decision_floor_ready": decision_floor >= LIVE_AUTOPILOT_MIN_DECISION_CONFIDENCE,
+    }
+    blocking_failures = [key for key, value in checks.items() if not bool(value)]
+    warnings: list[str] = []
+    if int(paper_feedback.get("total_settled", 0)) < LIVE_AUTOPILOT_MIN_PAPER_FEEDBACK_ROWS:
+        warnings.append(
+            f"Only {int(paper_feedback.get('total_settled', 0))} settled paper trades are available; keep live mode closely supervised."
+        )
+    if not bool(burn_in_report.get("unattended_eligible", False)):
+        warnings.append("Burn-in is still incomplete, so live auto trade should stay supervised for now.")
+    if not alerting_configured:
+        warnings.append("No webhook or paging alerting is configured yet.")
+    return {
+        "ok": not blocking_failures,
+        "reason": "" if not blocking_failures else f"Live auto-trade blocked: {', '.join(blocking_failures)}",
+        "checks": checks,
+        "blocking_failures": blocking_failures,
+        "warnings": warnings,
+        "decision_floor": decision_floor,
+        "required_decision_floor": LIVE_AUTOPILOT_MIN_DECISION_CONFIDENCE,
+        "paper_trade_feedback": paper_feedback,
+        "burn_in_report": burn_in_report,
+        "alerting_configured": alerting_configured,
+        "recommended": not blocking_failures and int(paper_feedback.get("total_settled", 0)) >= LIVE_AUTOPILOT_MIN_PAPER_FEEDBACK_ROWS,
+    }
+
+
 def record_autopilot_run_summary(
     *,
     run_id: int,
@@ -912,6 +972,7 @@ def log_trade_memory(
     target_cycles: int | None = None,
     size_plan: dict[str, Any] | None = None,
     account_snapshot: dict[str, Any] | None = None,
+    decision: dict[str, Any] | None = None,
 ) -> None:
     append_trade_memory(
         {
@@ -946,8 +1007,136 @@ def log_trade_memory(
             "allocation_pct": (size_plan or {}).get("allocation_pct"),
             "quote_size": (size_plan or {}).get("quote_size"),
             "base_size": (size_plan or {}).get("base_size"),
+            "decision_engine": (decision or {}).get("decision_engine"),
+            "decision_confidence": (decision or {}).get("decision_confidence"),
+            "market_regime": (decision or {}).get("market_regime"),
+            "llm_overlay": (decision or {}).get("llm_overlay"),
         }
     )
+
+
+def _trade_memory_feedback_key(entry: dict[str, Any]) -> str:
+    return "|".join(
+        [
+            str(entry.get("recorded_at") or ""),
+            str(entry.get("source") or ""),
+            str(entry.get("symbol") or ""),
+            str(entry.get("action") or ""),
+            str(entry.get("cycle") or ""),
+            f"{float(entry.get('market_price') or 0.0):.10f}",
+        ]
+    )
+
+
+def load_paper_trade_feedback(limit: int | None = None) -> list[dict[str, Any]]:
+    return _load_jsonl(PAPER_TRADE_FEEDBACK_PATH, limit=limit)
+
+
+def summarize_paper_trade_feedback_rows(rows: list[dict[str, Any]], recent_limit: int = 50) -> dict[str, Any]:
+    safe_recent_limit = max(1, int(recent_limit))
+    recent = list(rows)[-safe_recent_limit:]
+    positive = sum(1 for row in recent if str(row.get("outcome") or "") == "positive")
+    negative = sum(1 for row in recent if str(row.get("outcome") or "") == "negative")
+    neutral = sum(1 for row in recent if str(row.get("outcome") or "") == "neutral")
+    resolved = positive + negative
+    avg_pnl_pct = float(sum(float(row.get("pnl_pct") or 0.0) for row in recent) / len(recent)) if recent else 0.0
+    win_rate = float(positive / resolved) if resolved > 0 else 0.0
+    return {
+        "total_settled": len(rows),
+        "recent_window": safe_recent_limit,
+        "recent_positive": positive,
+        "recent_negative": negative,
+        "recent_neutral": neutral,
+        "recent_avg_pnl_pct": avg_pnl_pct,
+        "recent_win_rate": win_rate,
+        "latest_rows": recent[-10:],
+    }
+
+
+def settle_paper_trade_feedback(price_hints: dict[str, float] | None = None, limit: int = 300) -> dict[str, Any]:
+    feedback_rows = load_paper_trade_feedback(limit=2000)
+    settled_keys = {str(row.get("feedback_key") or "") for row in feedback_rows if str(row.get("feedback_key") or "")}
+    trade_rows = _load_jsonl(TRADE_MEMORY_PATH, limit=limit)
+    added = 0
+    skipped = 0
+    now_ts = time.time()
+    latest_rows: list[dict[str, Any]] = []
+
+    for row in trade_rows:
+        if not bool(row.get("dry_run", False)):
+            continue
+        if str(row.get("status") or "") != "dry_run_only":
+            continue
+        action = str(row.get("action") or "").lower()
+        if action not in {"market_buy", "market_sell"}:
+            continue
+        feedback_key = _trade_memory_feedback_key(row)
+        if feedback_key in settled_keys:
+            continue
+        recorded_at = str(row.get("recorded_at") or "")
+        try:
+            recorded_ts = calendar.timegm(time.strptime(recorded_at, "%Y-%m-%dT%H:%M:%SZ"))
+        except Exception:
+            skipped += 1
+            continue
+        if now_ts - recorded_ts < PAPER_TRADE_MIN_AGE_SECONDS:
+            continue
+
+        symbol = normalize_symbol(str(row.get("symbol") or CHECK_SYMBOL))
+        entry_price = float(row.get("market_price") or 0.0)
+        if entry_price <= 0:
+            skipped += 1
+            continue
+        current_price = float((price_hints or {}).get(symbol) or 0.0)
+        if current_price <= 0:
+            try:
+                current_price = float(get_market_price(symbol))
+            except Exception:
+                skipped += 1
+                continue
+
+        pnl_pct = ((current_price / entry_price) - 1.0) * 100.0
+        if action == "market_sell":
+            pnl_pct *= -1.0
+        if pnl_pct >= PAPER_TRADE_PROFIT_THRESHOLD_PCT:
+            outcome = "positive"
+        elif pnl_pct <= -PAPER_TRADE_PROFIT_THRESHOLD_PCT:
+            outcome = "negative"
+        else:
+            outcome = "neutral"
+
+        settlement = {
+            "recorded_at": utc_now_iso(),
+            "feedback_key": feedback_key,
+            "source": row.get("source"),
+            "symbol": symbol,
+            "action": action,
+            "entry_recorded_at": recorded_at,
+            "entry_price": entry_price,
+            "evaluation_price": current_price,
+            "pnl_pct": pnl_pct,
+            "outcome": outcome,
+            "min_age_seconds": PAPER_TRADE_MIN_AGE_SECONDS,
+            "profit_threshold_pct": PAPER_TRADE_PROFIT_THRESHOLD_PCT,
+            "decision_engine": row.get("decision_engine"),
+            "decision_confidence": row.get("decision_confidence"),
+            "market_regime": row.get("market_regime"),
+            "signal": row.get("signal"),
+            "probability_up": row.get("probability_up"),
+        }
+        _append_jsonl(PAPER_TRADE_FEEDBACK_PATH, settlement)
+        latest_rows.append(settlement)
+        settled_keys.add(feedback_key)
+        added += 1
+
+    summary = summarize_paper_trade_feedback_rows(feedback_rows + latest_rows, recent_limit=50)
+    return {
+        "status": "ok",
+        "added": added,
+        "skipped": skipped,
+        **summary,
+        "path": str(PAPER_TRADE_FEEDBACK_PATH),
+    }
 
 
 def set_runtime_value(key: str, value: Any) -> None:
@@ -4623,6 +4812,9 @@ def get_dashboard_payload(config: dict[str, Any] | None = None) -> dict[str, Any
     except Exception:
         fallback = get_runtime_value("latest_price_fallback")
         market_price = float(fallback or 0.0)
+    paper_trade_feedback = settle_paper_trade_feedback(
+        price_hints={cfg["live_symbol"]: float(market_price or 0.0)}
+    )
     size_plan = auto_order_size_from_confidence(
         signal=str(decision.get("signal", "HOLD")),
         probability_up=float(decision.get("probability_up", 0.5)),
@@ -4726,6 +4918,22 @@ def get_dashboard_payload(config: dict[str, Any] | None = None) -> dict[str, Any
         stop_loss_pct=float(plan["stop_loss_pct"]),
         fee_drag_pct=0.003,
     )
+    preview_gate_passed = bool(
+        autopilot_preview
+        and str(autopilot_preview.get("final_action") or "").upper() in {"BUY", "SELL"}
+        and not str((autopilot_preview.get("execution_plan") or {}).get("skip_reason") or "").strip()
+    )
+    live_start_gate = build_live_start_validation_report(
+        {
+            **cfg,
+            "preview_gate_passed": preview_gate_passed,
+            "max_api_latency_ms": 1200,
+            "max_ticker_age_ms": 3000,
+            "max_spread_bps": 20.0,
+            "max_failed_cycles_in_row": 8,
+            "max_runtime_minutes": 240,
+        }
+    )
     return {
         "status": "ok",
         "config": cfg,
@@ -4745,6 +4953,8 @@ def get_dashboard_payload(config: dict[str, Any] | None = None) -> dict[str, Any
         "goal_value": dashboard_goal_value,
         "size_plan": size_plan,
         "cycle_plan": cycle_plan,
+        "paper_trade_feedback": paper_trade_feedback,
+        "live_start_gate": live_start_gate,
         "autopilot": autopilot_snapshot(),
         "autopilot_recovery": {
             "persistence_healthy": bool(autopilot_snapshot().get("persistence_healthy", False)),
@@ -5631,6 +5841,7 @@ def run_autopilot(config: dict[str, Any], run_id: int) -> None:
                 target_cycles=current_target_cycles,
                 size_plan=size_plan,
                 account_snapshot=snapshot,
+                decision=decision,
             )
             refreshed_wallet_snapshot = wallet_snapshot
             refreshed_snapshot = snapshot
@@ -5647,6 +5858,16 @@ def run_autopilot(config: dict[str, Any], run_id: int) -> None:
                 refreshed_snapshot = get_account_snapshot(symbol)
             except Exception:
                 refreshed_snapshot = snapshot
+            paper_trade_feedback = settle_paper_trade_feedback(
+                price_hints={
+                    symbol: float(
+                        refreshed_snapshot.get("best_ask")
+                        or refreshed_snapshot.get("best_bid")
+                        or trade_result.get("market_price")
+                        or 0.0
+                    )
+                }
+            )
             goal_progress = compute_goal_progress(starting_value, current_value, goal_value)
             skip_reason = str(trade_result.get("skip_reason", execution_plan.get("skip_reason", "")) or "")
             if str((conversion_result or {}).get("status") or "") == "executed":
@@ -5765,6 +5986,8 @@ def run_autopilot(config: dict[str, Any], run_id: int) -> None:
                     "ticker_age_ms": trade_result.get("ticker_age_ms", refreshed_snapshot.get("ticker_age_ms")),
                     "spread_bps": trade_result.get("spread_bps", refreshed_snapshot.get("spread_bps")),
                     "guard": trade_result.get("guard_message", ""),
+                    "paper_trade_feedback_added": paper_trade_feedback.get("added", 0),
+                    "paper_trade_feedback_avg_pnl_pct": paper_trade_feedback.get("recent_avg_pnl_pct", 0.0),
                 }
             )
             update_autopilot_state(
@@ -6008,6 +6231,9 @@ def start_autopilot(config: dict[str, Any]) -> dict[str, Any]:
     start_gate = unattended_start_gate(normalized_config)
     if not bool(start_gate.get("ok", False)):
         raise RuntimeError(str(start_gate.get("reason") or "Unattended mode gate failed."))
+    live_start_gate = build_live_start_validation_report(normalized_config) if bool(normalized_config.get("allow_live", False)) else {}
+    if bool(normalized_config.get("allow_live", False)) and not bool(live_start_gate.get("ok", False)):
+        raise RuntimeError(str(live_start_gate.get("reason") or "Live auto-trade start gate failed."))
     with AUTOPILOT_LOCK:
         if _autopilot_thread_alive_unlocked() or bool(AUTOPILOT_STATE.get("running")) or str(AUTOPILOT_STATE.get("status", "")) in {"starting", "stopping"}:
             raise RuntimeError("Autopilot is already running.")
@@ -6084,6 +6310,7 @@ def start_autopilot(config: dict[str, Any]) -> dict[str, Any]:
                 "alerts": [],
                 "unattended_mode": bool(normalized_config.get("unattended_mode", False)),
                 "burn_in_report": build_burn_in_validation_report(),
+                "live_start_gate": live_start_gate,
                 "last_error": "",
             }
         )

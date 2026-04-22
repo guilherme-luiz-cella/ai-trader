@@ -10,7 +10,7 @@ Environment variables:
 - SELL_THRESHOLD: default 0.45
 - LLM_ENABLED: set true to enable optional LLM overlay
 - PRIMARY_MODEL / PRIMARY_MODEL_PATH: the trained model to use for local AI
-- LLM_PROVIDER: runtime provider such as local_transformers, openai_compatible, ollama, or huggingface_inference
+- LLM_PROVIDER: runtime provider such as local_transformers, openai_compatible, groq, ollama, or huggingface_inference
 - LLM_BASE_URL: runtime server base URL when using a server-based provider
 - LLM_API_KEY: API key for selected provider
 - ALLOW_MODEL_FALLBACK: set true to allow an explicit fallback model
@@ -71,6 +71,10 @@ LLM_MERGE_WEIGHT_HIGH = float(os.getenv("LLM_MERGE_WEIGHT_HIGH", "0.35"))
 HIGH_REGIME_REQUIRE_LLM_CONFIRMATION = os.getenv("HIGH_REGIME_REQUIRE_LLM_CONFIRMATION", "true").lower() == "true"
 HIGH_REGIME_MIN_LLM_CONFIDENCE = float(os.getenv("HIGH_REGIME_MIN_LLM_CONFIDENCE", "0.60"))
 EXTREME_REGIME_FORCE_HOLD = os.getenv("EXTREME_REGIME_FORCE_HOLD", "true").lower() == "true"
+MARKET_REGIME_TREND_LOOKBACK_ROWS = int(os.getenv("MARKET_REGIME_TREND_LOOKBACK_ROWS", "20"))
+MARKET_REGIME_VOLUME_LOOKBACK_ROWS = int(os.getenv("MARKET_REGIME_VOLUME_LOOKBACK_ROWS", "20"))
+MARKET_REGIME_TREND_THRESHOLD_PCT = float(os.getenv("MARKET_REGIME_TREND_THRESHOLD_PCT", "1.0"))
+MARKET_REGIME_VOLUME_SPIKE_RATIO = float(os.getenv("MARKET_REGIME_VOLUME_SPIKE_RATIO", "1.25"))
 CONFIDENCE_MERGE_ENABLED = os.getenv("CONFIDENCE_MERGE_ENABLED", "true").lower() == "true"
 CONFIDENCE_MODEL_WEIGHT = float(os.getenv("CONFIDENCE_MODEL_WEIGHT", "0.50"))
 CONFIDENCE_LLM_WEIGHT = float(os.getenv("CONFIDENCE_LLM_WEIGHT", "0.30"))
@@ -299,6 +303,13 @@ def compute_recent_volatility_pct(dataset_path: Path, lookback_rows: int) -> flo
 
 def compute_market_regime(dataset_path: Path) -> dict[str, Any]:
     volatility_pct = compute_recent_volatility_pct(dataset_path, VOLATILITY_LOOKBACK_ROWS)
+    trend_bias = "neutral"
+    volume_state = "normal"
+    market_state = "range_bound"
+    momentum_pct = 0.0
+    trend_strength_pct = 0.0
+    volume_ratio = 1.0
+    range_position_pct = 0.5
     if not VOLATILITY_REGIME_ENABLED:
         return {
             "enabled": False,
@@ -306,6 +317,45 @@ def compute_market_regime(dataset_path: Path) -> dict[str, Any]:
             "volatility_pct": volatility_pct,
             "notes": "Volatility regime controller disabled.",
         }
+
+    try:
+        raw = pd.read_csv(dataset_path)
+        if {"close", "high", "low"}.issubset(raw.columns):
+            close = pd.to_numeric(raw["close"], errors="coerce").dropna()
+            high = pd.to_numeric(raw["high"], errors="coerce").dropna()
+            low = pd.to_numeric(raw["low"], errors="coerce").dropna()
+            lookback = max(5, MARKET_REGIME_TREND_LOOKBACK_ROWS)
+            if len(close) >= lookback + 5:
+                recent_close = close.iloc[-1]
+                past_close = close.iloc[-lookback]
+                sma_fast = close.tail(10).mean()
+                sma_slow = close.tail(max(20, lookback)).mean()
+                momentum_pct = float(((recent_close / past_close) - 1.0) * 100.0) if past_close else 0.0
+                trend_strength_pct = float(((sma_fast / sma_slow) - 1.0) * 100.0) if sma_slow else 0.0
+                rolling_high = high.tail(lookback).max()
+                rolling_low = low.tail(lookback).min()
+                if rolling_high > rolling_low:
+                    range_position_pct = float((recent_close - rolling_low) / (rolling_high - rolling_low))
+                if trend_strength_pct >= MARKET_REGIME_TREND_THRESHOLD_PCT and momentum_pct >= 0:
+                    trend_bias = "bullish"
+                elif trend_strength_pct <= -MARKET_REGIME_TREND_THRESHOLD_PCT and momentum_pct <= 0:
+                    trend_bias = "bearish"
+                else:
+                    trend_bias = "neutral"
+        if "volume" in raw.columns:
+            volume = pd.to_numeric(raw["volume"], errors="coerce").dropna()
+            volume_lookback = max(5, MARKET_REGIME_VOLUME_LOOKBACK_ROWS)
+            if len(volume) >= volume_lookback:
+                trailing = volume.tail(volume_lookback)
+                trailing_mean = float(trailing.mean() or 0.0)
+                latest_volume = float(trailing.iloc[-1] or 0.0)
+                volume_ratio = (latest_volume / trailing_mean) if trailing_mean > 0 else 1.0
+                if volume_ratio >= MARKET_REGIME_VOLUME_SPIKE_RATIO:
+                    volume_state = "expanding"
+                elif volume_ratio <= (2.0 - MARKET_REGIME_VOLUME_SPIKE_RATIO):
+                    volume_state = "thin"
+    except Exception:
+        pass
 
     if volatility_pct >= VOLATILITY_EXTREME_PCT:
         regime = "extreme"
@@ -316,10 +366,32 @@ def compute_market_regime(dataset_path: Path) -> dict[str, Any]:
     else:
         regime = "medium"
 
+    if trend_bias == "bullish" and range_position_pct >= 0.60:
+        market_state = "trend_up"
+    elif trend_bias == "bearish" and range_position_pct <= 0.40:
+        market_state = "trend_down"
+    elif regime in {"high", "extreme"}:
+        market_state = "volatile"
+
+    notes = [
+        f"volatility regime={regime}",
+        f"trend_bias={trend_bias}",
+        f"market_state={market_state}",
+        f"volume_state={volume_state}",
+    ]
+
     return {
         "enabled": True,
         "regime": regime,
         "volatility_pct": volatility_pct,
+        "trend_bias": trend_bias,
+        "market_state": market_state,
+        "volume_state": volume_state,
+        "momentum_pct": momentum_pct,
+        "trend_strength_pct": trend_strength_pct,
+        "volume_ratio": volume_ratio,
+        "range_position_pct": range_position_pct,
+        "notes": notes,
         "thresholds": {
             "low_pct": VOLATILITY_LOW_PCT,
             "high_pct": VOLATILITY_HIGH_PCT,

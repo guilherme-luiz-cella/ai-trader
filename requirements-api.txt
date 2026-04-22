@@ -5,7 +5,3 @@ pandas
 python-dotenv
 requests
 scikit-learn
-torch
-transformers
-sentencepiece
-safetensors

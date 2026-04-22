@@ -182,7 +182,7 @@ This writes baseline-vs-upgraded comparison artifacts to `research/artifacts/pro
 - `DATASET_PATH`: optional path to a specific combined dataset CSV.
 - `BUY_THRESHOLD`: probability threshold for BUY, default `0.55`.
 - `SELL_THRESHOLD`: probability threshold for SELL, default `0.45`.
-- `LLM_PROVIDER`: `ollama` (local), `openai_compatible`, or `huggingface_inference`.
+- `LLM_PROVIDER`: `ollama` (local), `openai_compatible`, `groq`, or `huggingface_inference`.
 - `LLM_MODEL`: model name for the selected provider.
 - `LLM_BASE_URL`: provider base URL.
 - `LLM_API_KEY`: provider token/key (for Hugging Face use your HF token).
@@ -197,6 +197,10 @@ This writes baseline-vs-upgraded comparison artifacts to `research/artifacts/pro
 - `VOLATILITY_LOW_PCT`: volatility threshold for low regime.
 - `VOLATILITY_HIGH_PCT`: volatility threshold for high regime.
 - `VOLATILITY_EXTREME_PCT`: volatility threshold for extreme regime.
+- `MARKET_REGIME_TREND_LOOKBACK_ROWS`: rows used to classify directional trend.
+- `MARKET_REGIME_VOLUME_LOOKBACK_ROWS`: rows used to classify volume expansion or thin liquidity.
+- `MARKET_REGIME_TREND_THRESHOLD_PCT`: minimum fast-vs-slow trend spread for bullish/bearish classification.
+- `MARKET_REGIME_VOLUME_SPIKE_RATIO`: ratio used to classify expanding volume.
 - `LLM_MERGE_WEIGHT_HIGH`: LLM merge weight used in high-volatility regime.
 - `HIGH_REGIME_REQUIRE_LLM_CONFIRMATION`: if `true`, high-volatility trades require LLM confirmation.
 - `HIGH_REGIME_MIN_LLM_CONFIDENCE`: minimum LLM confidence required for high-volatility confirmation.
@@ -217,6 +221,22 @@ Use environment variables:
 - `LLM_CONFIDENCE_SOFT_GATE=true`
 
 This keeps the Python backend local or self-hosted while the LLM inference runs on Hugging Face free infrastructure.
+
+### Fast LLM Setup (Groq)
+
+Use environment variables:
+
+- `LLM_ENABLED=true`
+- `LLM_PROVIDER=groq`
+- `LLM_BASE_URL=https://api.groq.com/openai/v1`
+- `PRIMARY_MODEL=llama-3.3-70b-versatile`
+- `LLM_API_KEY=<your_groq_api_key>`
+- `ALLOW_MODEL_FALLBACK=false`
+- `LLM_MERGE_ENABLED=true`
+- `LLM_MERGE_WEIGHT=0.20`
+- `LLM_CONFIDENCE_FLOOR=0.40`
+
+This keeps Groq as the single fast reasoning provider while your backend model remains the primary trading engine.
 
 ### LLM Dataset Builder Environment Variables
 
@@ -245,5 +265,11 @@ The backend uses the latest model artifact and combined dataset, while the React
 Every trade action and autopilot cycle now appends a structured record to:
 
 - `research/runtime_memory/trade_memory.jsonl`
+- `research/runtime_memory/paper_trade_feedback.jsonl`
 
-This gives you a growing feedback dataset with signal, execution status, guardrail decisions, market conditions, and sizing metadata that you can later fold back into retraining.
+This gives you a growing feedback dataset with signal, execution status, guardrail decisions, market conditions, sizing metadata, and paper-trade outcomes that you can later fold back into retraining.
+
+Paper-trade settlement controls:
+
+- `PAPER_TRADE_MIN_AGE_SECONDS`: minimum age before a dry-run trade is scored against the latest market price.
+- `PAPER_TRADE_PROFIT_THRESHOLD_PCT`: profit/loss threshold used to classify outcomes as positive, neutral, or negative.

@@ -57,6 +57,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._send_json(
                     {
                         "status": "ok",
+                        "service": "signal-api",
+                        "service_health": "healthy",
                         "llm_status": services.get_llm_status(),
                         "notification_status": services.get_notification_status(),
                         "autopilot": services.autopilot_snapshot(),

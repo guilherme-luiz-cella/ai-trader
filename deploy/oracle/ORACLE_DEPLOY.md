@@ -188,11 +188,17 @@ Optional PagerDuty:
 
 ### Phase 1: infrastructure + dry-run
 
-1. Create OCI VM
-2. Open ingress:
+1. Create one OCI Compute VM.
+   Recommended practical starting point:
+   - image: Ubuntu 22.04 LTS or Ubuntu 24.04 LTS
+   - shape: `VM.Standard.A1.Flex` if Always Free capacity is available
+   - keep total Always Free usage within Oracle's published limits for your tenancy/home region
+   - assign a public IPv4 address so you can SSH and test HTTP
+2. Open ingress on the subnet security list or NSG attached to the instance:
    - `22` for SSH
    - `80` for HTTP
    - `443` for HTTPS
+   Oracle documents this under VCN security lists / ingress rules. If the VM is reachable by SSH but not by browser, this is the first place to check.
 3. Bootstrap Docker:
 
 ```bash
@@ -202,6 +208,10 @@ chmod +x deploy/oracle/bootstrap_vm.sh
 
 4. Create `.env`
    - easiest path: copy `.env.oracle.example` to `.env` on the Oracle VM and fill it in
+   - recommended first boot: leave `LLM_ENABLED=false`
+   - only switch `LLM_ENABLED=true` after you either:
+     - point `LLM_BASE_URL` at an external OpenAI-compatible runtime, or
+     - verify the Oracle VM can actually host the local model you want
 5. Deploy app:
 
 ```bash
@@ -216,6 +226,15 @@ docker compose -f docker-compose.oracle.yml ps
 curl http://127.0.0.1/health
 curl http://127.0.0.1/api/health
 ```
+
+7. Validate from your laptop:
+
+```bash
+curl http://YOUR_VM_PUBLIC_IP/health
+curl http://YOUR_VM_PUBLIC_IP/api/health
+```
+
+If those work over the public IP, the Oracle network path is correct and you can attach a domain later for HTTPS.
 
 ### Phase 2: notification validation
 

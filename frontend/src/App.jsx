@@ -45,6 +45,11 @@ function formatPercent(value) {
   return `${(Number(value || 0) * 100).toFixed(1)}%`;
 }
 
+function formatPercentPoints(value) {
+  const numeric = Number(value || 0);
+  return `${numeric >= 0 ? "+" : ""}${numeric.toFixed(2)}%`;
+}
+
 function formatCurrency(value) {
   return `$${Number(value || 0).toLocaleString(undefined, {
     minimumFractionDigits: 2,
@@ -96,6 +101,28 @@ function toneForAiRuntime(status) {
   if (status?.fallback_active) return "warn";
   if (status?.enabled && status?.is_trained_model) return "good";
   return "default";
+}
+
+function runtimeDisplay(status) {
+  if (!status?.enabled) {
+    return {
+      provider: "NONE",
+      headline: "AI runtime is disabled.",
+      detail: "No AI provider is active.",
+    };
+  }
+  if (status?.health_status === "error") {
+    return {
+      provider: "NONE",
+      headline: "AI runtime is unavailable.",
+      detail: status?.health_error || "Primary AI runtime is not reachable.",
+    };
+  }
+  return {
+    provider: String(status?.provider || "none").toUpperCase(),
+    headline: status?.fallback_active ? "Fallback runtime is active." : "Primary AI runtime is active.",
+    detail: status?.fallback_reason || status?.active_model || "AI runtime is online.",
+  };
 }
 
 function IntentCard({ title, symbol, action, detail, tone = "default", meta = [] }) {
@@ -529,6 +556,7 @@ function MarketMonitorChart({ chart, timeframe, onTimeframeChange, overlays, onO
 function App() {
   const [activeTab, setActiveTab] = useState("overview");
   const [health, setHealth] = useState("checking");
+  const [healthPayload, setHealthPayload] = useState(null);
   const [config, setConfig] = useState(initialConfig);
   const [dashboard, setDashboard] = useState(null);
   const [autopilotState, setAutopilotState] = useState(null);
@@ -562,8 +590,10 @@ function App() {
   async function refreshHealth() {
     try {
       const payload = await request("/health");
+      setHealthPayload(payload);
       setHealth(payload.status || "ok");
     } catch (error) {
+      setHealthPayload(null);
       setHealth("offline");
       setFeedback({ kind: "error", message: error.message });
     }
@@ -699,10 +729,30 @@ function App() {
   async function handleStartAutopilot(allowLive) {
     setSubmittingAutopilot(true);
     setFeedback({ kind: "", message: "" });
+    const previewGatePassed = Boolean(
+      autopilotPreview &&
+      String(autopilotPreview?.final_action || "").toUpperCase() !== "SKIP" &&
+      ["BUY", "SELL"].includes(String(decision.signal || "").toUpperCase()) &&
+      !String(autopilotPreview?.execution_plan?.skip_reason || "").trim()
+    );
+    const decisionFloor = allowLive
+      ? Math.max(Number(config.decision_min_confidence || decision?.decision_min_confidence || 0.55), 0.6)
+      : Number(config.decision_min_confidence || decision?.decision_min_confidence || 0.55);
     const body = {
       allow_live: allowLive,
       symbol: config.live_symbol,
       auto_rebalance_enabled: false,
+      decision_min_confidence: decisionFloor,
+      max_api_latency_ms: 1200,
+      warning_latency_ms: 700,
+      degraded_latency_ms: 950,
+      block_latency_ms: 1200,
+      max_ticker_age_ms: 3000,
+      max_spread_bps: 20,
+      min_trade_cooldown_seconds: 5,
+      max_failed_cycles_in_row: 8,
+      max_runtime_minutes: 240,
+      preview_gate_passed: previewGatePassed,
     };
     if (Number(autopilotForm.goal_value) > 0) {
       body.goal_value = Number(autopilotForm.goal_value);
@@ -849,21 +899,13 @@ function App() {
   const sizePlan = dashboard?.size_plan || {};
   const cyclePlan = dashboard?.cycle_plan || {};
   const llmStatus = dashboard?.llm_status || {};
+  const runtimeInfo = runtimeDisplay(llmStatus);
   const aiRuntimeTone = toneForAiRuntime(llmStatus);
-  const aiRuntimeHeadline =
-    llmStatus?.health_status === "error"
-      ? "Primary trained model is unavailable."
-      : llmStatus?.fallback_active
-        ? "Fallback model is active instead of your trained model."
-        : llmStatus?.enabled && llmStatus?.is_trained_model
-          ? "Your trained model is active."
-          : "Local AI runtime is disabled.";
+  const aiRuntimeHeadline = runtimeInfo.headline;
   const aiRuntimeDetail =
-    llmStatus?.health_error ||
-    llmStatus?.fallback_reason ||
     llmStatus?.active_model_path ||
-    llmStatus?.active_model ||
-    "No local AI model is active.";
+    runtimeInfo.detail ||
+    "No AI runtime is active.";
   const autopilotLogs = autopilotEvents?.events || autopilotState?.logs || [];
   const autopilotPreview = dashboard?.autopilot_preview || {};
   const latestTradeState = autopilotState?.latest_trade_result || {};
@@ -897,6 +939,21 @@ function App() {
   const opportunityRankings = latestTradeState?.opportunity_rankings || autopilotState?.opportunity_rankings || dashboard?.opportunity_panel?.ranked || [];
   const opportunityWinner = latestTradeState?.opportunity_winner || autopilotState?.opportunity_winner || dashboard?.opportunity_panel?.winner || {};
   const opportunityMeta = latestTradeState?.opportunity_meta || autopilotState?.opportunity_meta || dashboard?.opportunity_panel?.meta || {};
+  const burnInReport = dashboard?.autopilot_recovery?.burn_in_report || {};
+  const paperFeedback = dashboard?.paper_trade_feedback || {};
+  const liveStartGate = dashboard?.live_start_gate || autopilotState?.live_start_gate || {};
+  const liveStartChecks = liveStartGate?.checks || {};
+  const liveStartWarnings = liveStartGate?.warnings || [];
+  const paperFeedbackRows = paperFeedback?.latest_rows || [];
+  const marketRegime = decision?.market_regime || {};
+  const regimeNotes = Array.isArray(marketRegime?.notes) ? marketRegime.notes.filter(Boolean) : [];
+  const latestDecisionConfidence =
+    latestTradeState?.latest_decision?.decision_confidence ||
+    autopilotState?.latest_decision?.decision_confidence ||
+    chartData?.latest_decision?.decision_confidence ||
+    decision?.decision_confidence ||
+    dashboard?.decision_payload?.decision_confidence ||
+    0;
   const currentTradeSymbol = tradeResult?.symbol || tradePreview?.symbol || tradeForm.symbol;
   const currentTradeAction = tradeResult?.action || tradePreview?.action || tradeForm.action;
   const currentTradeTone = currentTradeAction === "market_buy" ? "good" : currentTradeAction === "market_sell" ? "bad" : "default";
@@ -931,8 +988,24 @@ function App() {
       </section>
 
       <section className="metrics-grid">
-        <MetricCard label="API Health" value={health.toUpperCase()} tone={health === "ok" ? "good" : "warn"} />
-        <MetricCard label="AI Runtime" value={(llmStatus?.provider || "none").toUpperCase()} detail={llmStatus?.is_trained_model ? "trained model" : "fallback or disabled"} />
+        <MetricCard
+          label="API Health"
+          value={health.toUpperCase()}
+          detail={healthPayload?.service || "signal-api"}
+          tone={health === "ok" ? "good" : "warn"}
+        />
+        <MetricCard
+          label="Docker Health"
+          value={String(healthPayload?.service_health || (health === "ok" ? "healthy" : "offline")).toUpperCase()}
+          detail={health === "ok" ? "container reachable" : "backend unavailable"}
+          tone={health === "ok" ? "good" : "bad"}
+        />
+        <MetricCard
+          label="AI Runtime"
+          value={runtimeInfo.provider}
+          detail={llmStatus?.fallback_active ? "fallback active" : llmStatus?.enabled ? "primary runtime" : "disabled"}
+          tone={aiRuntimeTone}
+        />
         <MetricCard label="Signal" value={decision.signal || "--"} tone={toneForSignal(decision.signal)} detail={decision.decision_engine || "ml"} />
         <MetricCard label="Probability Up" value={formatPercent(decision.probability_up)} detail={`ML ${formatPercent(decision.ml_probability_up)}`} />
         <MetricCard
@@ -1002,7 +1075,7 @@ function App() {
             <span className="symbol-banner-label">AI Runtime Status</span>
             <h3>{aiRuntimeHeadline}</h3>
           </div>
-          <StatusBadge tone={aiRuntimeTone}>{llmStatus?.provider || "disabled"}</StatusBadge>
+          <StatusBadge tone={aiRuntimeTone}>{runtimeInfo.provider}</StatusBadge>
         </div>
         <p className="warning-copy">{aiRuntimeDetail}</p>
         <div className="ai-runtime-meta">
@@ -1026,7 +1099,7 @@ function App() {
           </p>
           <div className="data-list">
             <div><span>Active symbol</span><strong>{autopilotActiveSymbol}</strong></div>
-            <div><span>AI runtime</span><strong>{llmStatus?.provider || "--"}</strong></div>
+            <div><span>AI runtime</span><strong>{runtimeInfo.provider}</strong></div>
             <div><span>Active model</span><strong>{llmStatus?.active_model || llmStatus?.active_model_path || "--"}</strong></div>
             <div><span>Model path</span><strong>{llmStatus?.active_model_path || "--"}</strong></div>
             <div><span>Path exists</span><strong>{String(Boolean(llmStatus?.path_exists))}</strong></div>
@@ -1119,6 +1192,39 @@ function App() {
                     <div><span>Recommended cycles</span><strong>{cyclePlan.recommended_cycles || 0}</strong></div>
                   </div>
                 </article>
+
+                <article className="subpanel-card">
+                  <div className="panel-header">
+                    <h3>Market Regime</h3>
+                    <span className="panel-caption">{marketRegime?.market_state || "waiting"}</span>
+                  </div>
+                  <div className="data-list">
+                    <div><span>Trend bias</span><strong>{marketRegime?.trend_bias || "--"}</strong></div>
+                    <div><span>Volume state</span><strong>{marketRegime?.volume_state || "--"}</strong></div>
+                    <div><span>Momentum</span><strong>{formatPercent(marketRegime?.momentum_pct || 0)}</strong></div>
+                    <div><span>Trend strength</span><strong>{formatPercent(marketRegime?.trend_strength_pct || 0)}</strong></div>
+                    <div><span>Range position</span><strong>{formatPercent(marketRegime?.range_position_pct || 0)}</strong></div>
+                    <div><span>Decision confidence</span><strong>{formatPercent(latestDecisionConfidence)}</strong></div>
+                  </div>
+                  {regimeNotes.length ? <p className="warning-copy">{regimeNotes.join(" ")}</p> : null}
+                </article>
+
+                <article className="subpanel-card">
+                  <div className="panel-header">
+                    <h3>Live Readiness</h3>
+                    <span className="panel-caption">{liveStartGate?.ok ? "ready" : "blocked"}</span>
+                  </div>
+                  <div className="data-list">
+                    <div><span>Preview gate</span><strong>{String(Boolean(liveStartChecks?.preview_gate_passed))}</strong></div>
+                    <div><span>Decision floor</span><strong>{formatPercent(liveStartGate?.decision_floor || 0)}</strong></div>
+                    <div><span>Required floor</span><strong>{formatPercent(liveStartGate?.required_decision_floor || 0)}</strong></div>
+                    <div><span>Paper feedback</span><strong>{paperFeedback?.total_settled || 0}</strong></div>
+                    <div><span>Burn-in runs</span><strong>{burnInReport?.total_supervised_live_runs || 0}</strong></div>
+                    <div><span>Unattended eligible</span><strong>{String(Boolean(burnInReport?.unattended_eligible))}</strong></div>
+                  </div>
+                  {liveStartGate?.reason ? <p className="warning-copy">{liveStartGate.reason}</p> : null}
+                  {liveStartWarnings.length ? <p className="warning-copy">{liveStartWarnings.join(" ")}</p> : null}
+                </article>
               </div>
 
               <LineChart
@@ -1148,6 +1254,33 @@ function App() {
                   ]}
                   rows={marketScan.slice(0, 25)}
                   emptyMessage={dashboard?.market_scan_error || "Scanner is quiet right now."}
+                />
+              </article>
+
+              <article className="subpanel-card">
+                <div className="panel-header">
+                  <h3>Paper Feedback Loop</h3>
+                  <span className="panel-caption">{paperFeedback?.total_settled || 0} settled trades</span>
+                </div>
+                <div className="data-list">
+                  <div><span>Recent win rate</span><strong>{formatPercent(paperFeedback?.recent_win_rate || 0)}</strong></div>
+                  <div><span>Avg PnL</span><strong>{formatPercentPoints(paperFeedback?.recent_avg_pnl_pct || 0)}</strong></div>
+                  <div><span>Positive</span><strong>{paperFeedback?.recent_positive || 0}</strong></div>
+                  <div><span>Negative</span><strong>{paperFeedback?.recent_negative || 0}</strong></div>
+                  <div><span>Neutral</span><strong>{paperFeedback?.recent_neutral || 0}</strong></div>
+                  <div><span>Window</span><strong>{paperFeedback?.recent_window || 0} trades</strong></div>
+                </div>
+                <DataTable
+                  columns={[
+                    { key: "symbol", label: "Symbol" },
+                    { key: "action", label: "Action" },
+                    { key: "outcome", label: "Outcome" },
+                    { key: "pnl_pct", label: "PnL", render: (value) => formatPercentPoints(value) },
+                    { key: "decision_confidence", label: "Confidence", render: (value) => formatPercent(value) },
+                    { key: "recorded_at", label: "Settled", render: (value) => formatDate(value) },
+                  ]}
+                  rows={[...paperFeedbackRows].reverse()}
+                  emptyMessage="Dry-run cycles will settle here once enough time has passed."
                 />
               </article>
             </div>
@@ -1211,11 +1344,13 @@ function App() {
                       <button className="warning-button" disabled={submittingAutopilot} onClick={() => handleStartAutopilot(true)}>Start Live Auto Trade</button>
                       <button className="ghost-button" disabled={submittingAutopilot} onClick={handleStopAutopilot}>Cancel Auto Trade</button>
                     </div>
+                    {liveStartGate?.reason ? <p className="warning-copy">{liveStartGate.reason}</p> : null}
+                    {liveStartWarnings.length ? <p className="warning-copy">{liveStartWarnings.join(" ")}</p> : null}
                     <div className="data-list">
                       <div><span>Cycle</span><strong>{autopilotState?.current_cycle || 0} / {autopilotState?.target_cycles || 0}</strong></div>
                       <div><span>Decision</span><strong>{autopilotSignal}</strong></div>
                       <div><span>Trade result</span><strong>{latestTradeState?.signal_trade?.status || latestTradeState?.status || "--"}</strong></div>
-                      <div><span>Decision confidence</span><strong>{formatPercent(latestTradeState?.latest_decision?.decision_confidence || autopilotState?.latest_decision?.decision_confidence || chartData?.latest_decision?.decision_confidence || 0)}</strong></div>
+                      <div><span>Decision confidence</span><strong>{formatPercent(latestDecisionConfidence)}</strong></div>
                       <div><span>Current value</span><strong>{formatCurrency(autopilotCurrentValue)}</strong></div>
                       <div><span>Goal</span><strong>{formatCurrency(autopilotGoalValue)}</strong></div>
                       <div><span>Progress</span><strong>{formatPercent(autopilotProgressPct)}</strong></div>
@@ -1224,6 +1359,8 @@ function App() {
                       <div><span>Stable exit</span><strong>{autopilotFinalStableAsset}</strong></div>
                       <div><span>Finalization</span><strong>{autopilotFinalizationStatus}</strong></div>
                       <div><span>Stop reason</span><strong>{autopilotFinalStopReason}</strong></div>
+                      <div><span>Preview gate</span><strong>{String(Boolean(liveStartChecks?.preview_gate_passed))}</strong></div>
+                      <div><span>Burn-in eligible</span><strong>{String(Boolean(burnInReport?.unattended_eligible))}</strong></div>
                       <div><span>Updated</span><strong>{formatDate(autopilotState?.updated_at)}</strong></div>
                     </div>
                   </article>

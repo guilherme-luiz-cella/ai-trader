@@ -199,3 +199,5 @@ Typical flow:
 1. `python research/build_datasets.py`
 2. `python research/train_combined_model.py`
 3. or `python research/train_model.py`
+
+For a fast hosted AI layer, the backend now supports `LLM_PROVIDER=groq` with `LLM_BASE_URL=https://api.groq.com/openai/v1` and a primary model such as `llama-3.3-70b-versatile`, while keeping `ALLOW_MODEL_FALLBACK=false`.
