@@ -37,6 +37,15 @@ _DEFAULT_BASE_URLS = {
     "deepseek": "https://api.deepseek.com",
     "huggingface_inference": "https://api-inference.huggingface.co",
 }
+_RATE_LIMIT_HEADER_MAP = {
+    "retry-after": "retry_after",
+    "x-ratelimit-limit-requests": "limit_requests",
+    "x-ratelimit-limit-tokens": "limit_tokens",
+    "x-ratelimit-remaining-requests": "remaining_requests",
+    "x-ratelimit-remaining-tokens": "remaining_tokens",
+    "x-ratelimit-reset-requests": "reset_requests",
+    "x-ratelimit-reset-tokens": "reset_tokens",
+}
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -44,6 +53,16 @@ def _env_bool(name: str, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return float(default)
+    try:
+        return float(value.strip())
+    except ValueError:
+        return float(default)
 
 
 def _normalize_provider_and_base_url(provider: str, base_url: str) -> tuple[str, str]:
@@ -93,6 +112,7 @@ def get_llm_runtime_config() -> dict[str, Any]:
     bypass_proxy = _env_bool("LLM_BYPASS_ENV_PROXY", True)
     llm_enabled = _env_bool("LLM_ENABLED", False)
     explicit_trained = _env_bool("PRIMARY_MODEL_IS_TRAINED", True)
+    temperature = max(0.0, _env_float("LLM_TEMPERATURE", 0.0))
     provider, base_url = _normalize_provider_and_base_url(provider, base_url)
     return {
         "enabled": llm_enabled,
@@ -107,6 +127,7 @@ def get_llm_runtime_config() -> dict[str, Any]:
         "api_key": api_key,
         "bypass_proxy": bypass_proxy,
         "is_trained_model": explicit_trained,
+        "temperature": temperature,
     }
 
 
@@ -276,7 +297,18 @@ def validate_llm_startup() -> dict[str, Any]:
     return validation
 
 
-def _chat_local_transformers(system_prompt: str, user_content: str, max_new_tokens: int) -> str:
+def _extract_rate_limit_headers(response: requests.Response | None) -> dict[str, str]:
+    if response is None:
+        return {}
+    extracted: dict[str, str] = {}
+    for raw_name, friendly_name in _RATE_LIMIT_HEADER_MAP.items():
+        value = response.headers.get(raw_name, "").strip()
+        if value:
+            extracted[friendly_name] = value
+    return extracted
+
+
+def _chat_local_transformers(system_prompt: str, user_content: str, max_new_tokens: int, temperature: float) -> str:
     model_target = _resolved_model_target(get_llm_runtime_config())
     tokenizer, model = _load_local_transformers_model(str(model_target["model_path"]))
     messages = [
@@ -294,14 +326,17 @@ def _chat_local_transformers(system_prompt: str, user_content: str, max_new_toke
 
     import torch
 
+    use_sampling = float(temperature) > 0.0
     with torch.no_grad():
-        outputs = model.generate(
+        generate_kwargs = {
             **inputs,
-            max_new_tokens=max_new_tokens,
-            temperature=0.2,
-            do_sample=True,
-            pad_token_id=tokenizer.eos_token_id,
-        )
+            "max_new_tokens": max_new_tokens,
+            "do_sample": use_sampling,
+            "pad_token_id": tokenizer.eos_token_id,
+        }
+        if use_sampling:
+            generate_kwargs["temperature"] = float(temperature)
+        outputs = model.generate(**generate_kwargs)
 
     generated = outputs[0][inputs["input_ids"].shape[1] :]
     return tokenizer.decode(generated, skip_special_tokens=True)
@@ -319,14 +354,21 @@ def llm_chat(system_prompt: str, user_content: str, max_new_tokens: int = 300, r
         return {"status": "error", "content": "", "error": str(exc), **get_llm_status()}
 
     provider = str(config.get("provider") or "")
+    temperature = max(0.0, float(config.get("temperature") or 0.0))
     if provider == "local_transformers":
         try:
-            content = _chat_local_transformers(system_prompt=system_prompt, user_content=user_content, max_new_tokens=max_new_tokens)
+            content = _chat_local_transformers(
+                system_prompt=system_prompt,
+                user_content=user_content,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+            )
             result = {
                 "status": "ok",
                 "content": content,
                 "endpoint": "local://transformers",
                 "handled_by_model": model_target["model"],
+                "rate_limit": {},
                 **get_llm_status(),
             }
             print(f"[llm] inference provider={result.get('provider')} model={result.get('handled_by_model')} fallback_active={result.get('fallback_active')}")
@@ -345,7 +387,7 @@ def llm_chat(system_prompt: str, user_content: str, max_new_tokens: int = 300, r
         payload: dict[str, Any] = {
             "model": model_target["model"],
             "stream": False,
-            "options": {"temperature": 0.2},
+            "options": {"temperature": temperature},
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
@@ -357,7 +399,7 @@ def llm_chat(system_prompt: str, user_content: str, max_new_tokens: int = 300, r
         endpoint = f"{str(config.get('base_url') or '').rstrip('/')}/chat/completions"
         payload = {
             "model": model_target["model"],
-            "temperature": 0.2,
+            "temperature": temperature,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
@@ -369,7 +411,7 @@ def llm_chat(system_prompt: str, user_content: str, max_new_tokens: int = 300, r
         endpoint = f"{str(config.get('base_url') or '').rstrip('/')}/models/{model_target['model']}"
         payload = {
             "inputs": f"{system_prompt}\n{user_content}",
-            "parameters": {"max_new_tokens": max_new_tokens, "temperature": 0.2, "return_full_text": False},
+            "parameters": {"max_new_tokens": max_new_tokens, "temperature": temperature, "return_full_text": False},
         }
     else:
         return {"status": "error", "content": "", "error": f"Unsupported LLM provider: {provider}", **get_llm_status()}
@@ -395,12 +437,40 @@ def llm_chat(system_prompt: str, user_content: str, max_new_tokens: int = 300, r
             "content": content,
             "endpoint": endpoint,
             "handled_by_model": model_target["model"],
+            "rate_limit": _extract_rate_limit_headers(response),
             **get_llm_status(),
         }
         print(f"[llm] inference provider={result.get('provider')} model={result.get('handled_by_model')} fallback_active={result.get('fallback_active')}")
         return result
+    except requests.HTTPError as exc:
+        response = exc.response
+        error_text = str(exc)
+        if response is not None:
+            try:
+                body = response.json()
+            except Exception:
+                body = response.text
+            error_text = f"{error_text}; response={body}"
+        result = {
+            "status": "error",
+            "content": "",
+            "error": error_text,
+            "endpoint": endpoint,
+            "status_code": int(response.status_code) if response is not None else 0,
+            "rate_limit": _extract_rate_limit_headers(response),
+            **get_llm_status(),
+        }
+        print(f"[llm] inference_error provider={result.get('provider')} model={result.get('active_model') or result.get('active_model_path')} error={result.get('error')}")
+        return result
     except Exception as exc:
-        result = {"status": "error", "content": "", "error": str(exc), "endpoint": endpoint, **get_llm_status()}
+        result = {
+            "status": "error",
+            "content": "",
+            "error": str(exc),
+            "endpoint": endpoint,
+            "rate_limit": {},
+            **get_llm_status(),
+        }
         print(f"[llm] inference_error provider={result.get('provider')} model={result.get('active_model') or result.get('active_model_path')} error={result.get('error')}")
         return result
 

@@ -60,7 +60,7 @@ LLM_ENABLED = os.getenv("LLM_ENABLED", "false").lower() == "true"
 LLM_MERGE_ENABLED = os.getenv("LLM_MERGE_ENABLED", "false").lower() == "true"
 LLM_MERGE_WEIGHT = float(os.getenv("LLM_MERGE_WEIGHT", "0.20"))
 LLM_CONFIDENCE_FLOOR = float(os.getenv("LLM_CONFIDENCE_FLOOR", "0.55"))
-LLM_CONFIDENCE_SOFT_GATE = os.getenv("LLM_CONFIDENCE_SOFT_GATE", "true").lower() == "true"
+LLM_CONFIDENCE_SOFT_GATE = os.getenv("LLM_CONFIDENCE_SOFT_GATE", "false").lower() == "true"
 ADAPTIVE_THRESHOLD_ENABLED = os.getenv("ADAPTIVE_THRESHOLD_ENABLED", "true").lower() == "true"
 VOLATILITY_REGIME_ENABLED = os.getenv("VOLATILITY_REGIME_ENABLED", "true").lower() == "true"
 VOLATILITY_LOOKBACK_ROWS = int(os.getenv("VOLATILITY_LOOKBACK_ROWS", "120"))
@@ -183,10 +183,14 @@ def generate_llm_overlay(
         }
 
     system_prompt = (
-        "You are a risk-aware trading assistant. "
-        "Given model probability and thresholds, output conservative recommendation. "
-        "Return strict JSON only with keys: llm_signal, confidence, rationale, risk_flags. "
-        "confidence MUST be a numeric float between 0 and 1 (example: 0.63), not a range and not text."
+        "You are a conservative trading overlay validator. "
+        "Your job is to validate an ML trading probability, not to invent extra conviction. "
+        "If the evidence is weak, uncertain, malformed, or borderline, choose HOLD. "
+        "Return exactly one JSON object with these keys only: llm_signal, confidence, rationale, risk_flags. "
+        "llm_signal must be one of BUY, SELL, HOLD. "
+        "confidence must be a JSON number between 0 and 1, not text, not a range, and not a percentage string. "
+        "rationale must be a short plain-English sentence. "
+        "risk_flags must be an array of short strings."
     )
     user_payload = {
         "probability_up": probability_up,
@@ -216,10 +220,28 @@ def generate_llm_overlay(
                 "model": llm_response.get("active_model") or llm_response.get("active_model_path"),
                 "message": str(llm_response.get("error") or "LLM overlay failed."),
                 "fallback_active": bool(llm_response.get("fallback_active", False)),
+                "rate_limit": dict(llm_response.get("rate_limit") or {}),
             }
 
         content = str(llm_response.get("content", ""))
         parsed = _extract_json_object(content)
+        validated = validate_llm_overlay_payload(parsed)
+        if validated.get("status") != "ok":
+            return {
+                "enabled": True,
+                "status": "invalid_response",
+                "provider": llm_response.get("provider"),
+                "model": llm_response.get("active_model") or llm_response.get("active_model_path"),
+                "endpoint": llm_response.get("endpoint", ""),
+                "is_trained_model": bool(llm_response.get("is_trained_model", False)),
+                "fallback_active": bool(llm_response.get("fallback_active", False)),
+                "llm_signal": "HOLD",
+                "confidence": 0.0,
+                "rationale": str(validated.get("message") or "Invalid LLM overlay response."),
+                "risk_flags": ["invalid_response"],
+                "raw_content": content,
+                "rate_limit": dict(llm_response.get("rate_limit") or {}),
+            }
         return {
             "enabled": True,
             "status": "ok",
@@ -228,13 +250,11 @@ def generate_llm_overlay(
             "endpoint": llm_response.get("endpoint", ""),
             "is_trained_model": bool(llm_response.get("is_trained_model", False)),
             "fallback_active": bool(llm_response.get("fallback_active", False)),
-            "llm_signal": str(parsed.get("llm_signal", "HOLD")).upper(),
-            "confidence": parse_confidence(
-                parsed.get("confidence", 0.0),
-                llm_signal=str(parsed.get("llm_signal", "HOLD")),
-            ),
-            "rationale": str(parsed.get("rationale", "")),
-            "risk_flags": parsed.get("risk_flags", []),
+            "llm_signal": str(validated.get("llm_signal") or "HOLD"),
+            "confidence": float(validated.get("confidence") or 0.0),
+            "rationale": str(validated.get("rationale") or ""),
+            "risk_flags": list(validated.get("risk_flags") or []),
+            "rate_limit": dict(llm_response.get("rate_limit") or {}),
         }
     except Exception as exc:
         status = get_llm_status()
@@ -252,37 +272,65 @@ def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
-def parse_confidence(value: Any, llm_signal: str = "HOLD") -> float:
+def normalize_llm_signal(value: Any) -> str | None:
+    signal = str(value or "").strip().upper()
+    if signal in {"BUY", "SELL", "HOLD"}:
+        return signal
+    return None
+
+
+def parse_confidence(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+        if 0.0 <= numeric <= 1.0:
+            return clamp(numeric, 0.0, 1.0)
+        return None
+
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if not re.fullmatch(r"(?:0(?:\.\d+)?|1(?:\.0+)?)", text):
+        return None
     try:
-        return clamp(float(value), 0.0, 1.0)
-    except (TypeError, ValueError):
-        pass
-
-    text = str(value or "")
-    matches = re.findall(r"-?\d+(?:\.\d+)?", text)
-    if not matches:
-        return 0.60 if str(llm_signal).upper() in {"BUY", "SELL"} else 0.0
-
-    numeric_candidates: list[float] = []
-    for match in matches:
-        try:
-            numeric_candidates.append(float(match))
-        except ValueError:
-            continue
-
-    if not numeric_candidates:
-        return 0.60 if str(llm_signal).upper() in {"BUY", "SELL"} else 0.0
-
-    bounded = [item for item in numeric_candidates if 0.0 <= item <= 1.0]
-    if bounded:
-        if len(bounded) >= 2 and text.count("-") >= 1 and min(bounded) == 0.0 and max(bounded) == 1.0:
-            return 0.60 if str(llm_signal).upper() in {"BUY", "SELL"} else 0.0
-        return clamp(max(bounded), 0.0, 1.0)
-
-    try:
-        return clamp(float(numeric_candidates[0]), 0.0, 1.0)
+        return clamp(float(text), 0.0, 1.0)
     except ValueError:
-        return 0.60 if str(llm_signal).upper() in {"BUY", "SELL"} else 0.0
+        return None
+
+
+def sanitize_risk_flags(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    cleaned: list[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if not text or text in cleaned:
+            continue
+        cleaned.append(text[:80])
+    return cleaned[:5]
+
+
+def validate_llm_overlay_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    signal = normalize_llm_signal(payload.get("llm_signal"))
+    if signal is None:
+        return {"status": "error", "message": "llm_signal must be BUY, SELL, or HOLD."}
+
+    confidence = parse_confidence(payload.get("confidence"))
+    if confidence is None:
+        return {"status": "error", "message": "confidence must be a numeric float between 0 and 1."}
+
+    rationale = str(payload.get("rationale") or "").strip()
+    if not rationale:
+        return {"status": "error", "message": "rationale is required."}
+
+    return {
+        "status": "ok",
+        "llm_signal": signal,
+        "confidence": float(confidence),
+        "rationale": rationale[:240],
+        "risk_flags": sanitize_risk_flags(payload.get("risk_flags", [])),
+    }
 
 
 def compute_recent_volatility_pct(dataset_path: Path, lookback_rows: int) -> float:

@@ -189,7 +189,8 @@ This writes baseline-vs-upgraded comparison artifacts to `research/artifacts/pro
 - `LLM_MERGE_ENABLED`: set `true` to merge LLM view with ML probability.
 - `LLM_MERGE_WEIGHT`: merge weight (0.0-0.5).
 - `LLM_CONFIDENCE_FLOOR`: minimum confidence required for merge.
-- `LLM_CONFIDENCE_SOFT_GATE`: if `true`, low confidence scales merge weight down instead of fully disabling merge.
+- `LLM_CONFIDENCE_SOFT_GATE`: if `true`, low confidence scales merge weight down instead of fully disabling merge. Default is `false` so weak overlays are rejected instead of softly blended.
+- `LLM_TEMPERATURE`: decoding temperature for supported LLM providers. Default `0.0` for deterministic, stricter JSON output.
 - `LLM_TIMEOUT_SECONDS`: HTTP timeout for LLM requests, default `30`.
 - `LLM_BYPASS_ENV_PROXY`: if `true`, retries direct HTTPS without environment proxy when proxy tunnel fails.
 - `VOLATILITY_REGIME_ENABLED`: if `true`, auto-switches strategy behavior by volatility regime.
@@ -218,7 +219,8 @@ Use environment variables:
 - `LLM_MERGE_ENABLED=true`
 - `LLM_MERGE_WEIGHT=0.20`
 - `LLM_CONFIDENCE_FLOOR=0.40`
-- `LLM_CONFIDENCE_SOFT_GATE=true`
+- `LLM_CONFIDENCE_SOFT_GATE=false`
+- `LLM_TEMPERATURE=0.0`
 
 This keeps the Python backend local or self-hosted while the LLM inference runs on Hugging Face free infrastructure.
 
@@ -235,8 +237,10 @@ Use environment variables:
 - `LLM_MERGE_ENABLED=true`
 - `LLM_MERGE_WEIGHT=0.20`
 - `LLM_CONFIDENCE_FLOOR=0.40`
+- `LLM_CONFIDENCE_SOFT_GATE=false`
+- `LLM_TEMPERATURE=0.0`
 
-This keeps Groq as the single fast reasoning provider while your backend model remains the primary trading engine.
+This keeps Groq as the single fast reasoning provider while your backend model remains the primary trading engine. The hardened default is conservative: malformed or weak-confidence overlays are forced to `HOLD` instead of being softly merged into the trading probability.
 
 ### LLM Dataset Builder Environment Variables
 
