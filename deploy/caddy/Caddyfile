@@ -3,7 +3,7 @@
 	auto_https disable_redirects
 }
 
-(app_routes) {
+(frontend_routes) {
 	encode zstd gzip
 
 	handle_path /api/* {
@@ -21,11 +21,21 @@
 	}
 }
 
+(api_routes) {
+	encode zstd gzip
+	reverse_proxy signal-api:8765
+}
+
 :80 {
-	import app_routes
+	import frontend_routes
 }
 
 {$APP_DOMAIN:localhost} {
 	tls {$ACME_EMAIL}
-	import app_routes
+	import frontend_routes
+}
+
+{$API_DOMAIN:api.localhost} {
+	tls {$ACME_EMAIL}
+	import api_routes
 }

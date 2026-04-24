@@ -1,4 +1,5 @@
 ccxt
+argon2-cffi
 joblib
 numpy
 pandas

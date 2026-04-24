@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "/api").replace(/\/$/, "");
+const AUTH_STORAGE_KEY = "trading-control-auth-token";
+const AUTH_EMAIL_STORAGE_KEY = "trading-control-auth-email";
 
 const initialConfig = {
   live_symbol: "BTC/USDT",
@@ -22,17 +24,31 @@ const initialTradeForm = {
   min_trade_cooldown_seconds: 5,
 };
 
+function createRequestError(message, status) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+}
+
 async function request(path, options = {}) {
+  const authToken = options.authToken ?? window.localStorage.getItem(AUTH_STORAGE_KEY) ?? "";
+  const headers = {
+    "Content-Type": "application/json",
+    ...(options.headers || {}),
+  };
+  if (authToken) {
+    headers.Authorization = `Bearer ${authToken}`;
+  }
   const response = await fetch(`${API_BASE_URL}${path}`, {
-    headers: {
-      "Content-Type": "application/json",
-      ...(options.headers || {}),
-    },
+    headers,
     ...options,
   });
   const payload = await response.json().catch(() => ({}));
+  if (response.status === 401 || payload.status === "unauthorized") {
+    throw createRequestError(payload.message || "Authentication required.", 401);
+  }
   if (!response.ok || payload.status === "error") {
-    throw new Error(payload.message || `Request failed for ${path}`);
+    throw createRequestError(payload.message || `Request failed for ${path}`, response.status);
   }
   return payload;
 }
@@ -94,6 +110,36 @@ function MetricCard({ label, value, tone = "default", detail }) {
 
 function StatusBadge({ tone = "default", children }) {
   return <span className={`status-badge ${tone}`}>{children}</span>;
+}
+
+function LoginGate({ email, password, loading, error, onEmailChange, onPasswordChange, onSubmit }) {
+  return (
+    <main className="login-shell">
+      <section className="login-panel">
+        <div className="login-copy">
+          <p className="eyebrow">Private Operator Access</p>
+          <h1>Trading Control Room</h1>
+          <p className="hero-copy">
+            Sign in with your operator email and password. The password is verified server-side against your Argon2 hash.
+          </p>
+        </div>
+        <form className="login-form" onSubmit={onSubmit}>
+          <label>
+            <span>Email</span>
+            <input type="email" value={email} autoComplete="email" onChange={(event) => onEmailChange(event.target.value)} />
+          </label>
+          <label>
+            <span>Password</span>
+            <input type="password" value={password} autoComplete="current-password" onChange={(event) => onPasswordChange(event.target.value)} />
+          </label>
+          {error ? <div className="message error">{error}</div> : null}
+          <button className="primary-button login-button" type="submit" disabled={loading}>
+            {loading ? "Signing In..." : "Sign In"}
+          </button>
+        </form>
+      </section>
+    </main>
+  );
 }
 
 function toneForAiRuntime(status) {
@@ -554,6 +600,11 @@ function MarketMonitorChart({ chart, timeframe, onTimeframeChange, overlays, onO
 }
 
 function App() {
+  const [authToken, setAuthToken] = useState(() => window.localStorage.getItem(AUTH_STORAGE_KEY) || "");
+  const [loginEmail, setLoginEmail] = useState(() => window.localStorage.getItem(AUTH_EMAIL_STORAGE_KEY) || "");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [loginError, setLoginError] = useState("");
+  const [loggingIn, setLoggingIn] = useState(false);
   const [activeTab, setActiveTab] = useState("overview");
   const [health, setHealth] = useState("checking");
   const [healthPayload, setHealthPayload] = useState(null);
@@ -587,12 +638,30 @@ function App() {
   });
   const activeChartSymbol = autopilotState?.symbol || config.live_symbol || "BTC/USDT";
 
+  function applyUnauthorizedState(message = "Sign in again to continue.") {
+    window.localStorage.removeItem(AUTH_STORAGE_KEY);
+    setAuthToken("");
+    setLoginPassword("");
+    setLoginError(message);
+  }
+
+  function handleRequestFailure(error) {
+    if (error?.status === 401) {
+      applyUnauthorizedState(error.message);
+      return true;
+    }
+    return false;
+  }
+
   async function refreshHealth() {
     try {
       const payload = await request("/health");
       setHealthPayload(payload);
       setHealth(payload.status || "ok");
     } catch (error) {
+      if (handleRequestFailure(error)) {
+        return;
+      }
       setHealthPayload(null);
       setHealth("offline");
       setFeedback({ kind: "error", message: error.message });
@@ -623,6 +692,9 @@ function App() {
         goal_value: current.goal_value > 0 ? current.goal_value : Number(payload.goal_value || 0),
       }));
     } catch (error) {
+      if (handleRequestFailure(error)) {
+        return;
+      }
       setFeedback({ kind: "error", message: error.message });
     } finally {
       if (!silent) {
@@ -636,6 +708,9 @@ function App() {
       const payload = await request("/autopilot/status");
       setAutopilotState(payload.autopilot || null);
     } catch (error) {
+      if (handleRequestFailure(error)) {
+        return;
+      }
       setFeedback({ kind: "error", message: error.message });
     }
   }
@@ -649,6 +724,9 @@ function App() {
       const payload = await request(`/market/chart?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}&limit=200`);
       setChartData(payload.chart || null);
     } catch (error) {
+      if (handleRequestFailure(error)) {
+        return;
+      }
       setFeedback({ kind: "error", message: error.message });
     } finally {
       if (!silent) {
@@ -666,6 +744,9 @@ function App() {
       const payload = await request(`/market/ticker?symbol=${encodeURIComponent(symbol)}`);
       setLiveTicker(payload.ticker || null);
     } catch (error) {
+      if (handleRequestFailure(error)) {
+        return;
+      }
       setFeedback({ kind: "error", message: error.message });
     } finally {
       if (!silent) {
@@ -680,6 +761,9 @@ function App() {
       const payload = await request("/autopilot/events?limit=100");
       setAutopilotEvents(payload.autopilot_events || null);
     } catch (error) {
+      if (handleRequestFailure(error)) {
+        return;
+      }
       if (!silent) {
         setFeedback({ kind: "error", message: error.message });
       }
@@ -688,11 +772,13 @@ function App() {
 
   useEffect(() => {
     refreshHealth();
-    refreshDashboard();
-  }, []);
+    if (authToken) {
+      refreshDashboard();
+    }
+  }, [authToken]);
 
   useEffect(() => {
-    if (!activeChartSymbol) {
+    if (!authToken || !activeChartSymbol) {
       return undefined;
     }
     refreshMarketChart(activeChartSymbol, chartInterval);
@@ -704,15 +790,66 @@ function App() {
       refreshAutopilotEvents({ silent: true });
     }, 5000);
     return () => window.clearInterval(intervalHandle);
-  }, [activeChartSymbol, chartInterval]);
+  }, [activeChartSymbol, chartInterval, authToken]);
 
   useEffect(() => {
+    if (!authToken) {
+      return undefined;
+    }
     const interval = window.setInterval(() => {
       refreshHealth();
       refreshAutopilotStatus();
     }, 5000);
     return () => window.clearInterval(interval);
-  }, []);
+  }, [authToken]);
+
+  async function handleLoginSubmit(event) {
+    event.preventDefault();
+    setLoggingIn(true);
+    setLoginError("");
+    try {
+      const payload = await request("/auth/login", {
+        method: "POST",
+        body: JSON.stringify({
+          email: loginEmail,
+          password: loginPassword,
+        }),
+        authToken: "",
+      });
+      const token = payload?.auth?.token || "";
+      const email = payload?.auth?.email || loginEmail;
+      window.localStorage.setItem(AUTH_STORAGE_KEY, token);
+      window.localStorage.setItem(AUTH_EMAIL_STORAGE_KEY, email);
+      setAuthToken(token);
+      setLoginEmail(email);
+      setLoginPassword("");
+      setFeedback({ kind: "success", message: "Signed in." });
+    } catch (error) {
+      setLoginError(error.message);
+    } finally {
+      setLoggingIn(false);
+    }
+  }
+
+  async function handleLogout() {
+    try {
+      if (authToken) {
+        await request("/auth/logout", {
+          method: "POST",
+          body: JSON.stringify({}),
+          authToken,
+        });
+      }
+    } catch (_error) {
+      // Best-effort logout.
+    } finally {
+      window.localStorage.removeItem(AUTH_STORAGE_KEY);
+      setAuthToken("");
+      setLoginPassword("");
+      setLoginError("");
+      setFeedback({ kind: "", message: "" });
+    }
+  }
 
   function updateTradeField(name, value) {
     setTradeForm((current) => ({ ...current, [name]: value }));
@@ -768,6 +905,9 @@ function App() {
         message: allowLive ? "Live autopilot is running from the Python backend." : "Dry-run autopilot started on the backend.",
       });
     } catch (error) {
+      if (handleRequestFailure(error)) {
+        return;
+      }
       setFeedback({ kind: "error", message: error.message });
     } finally {
       setSubmittingAutopilot(false);
@@ -784,6 +924,9 @@ function App() {
       setAutopilotState(payload.autopilot || null);
       setFeedback({ kind: "success", message: "Autopilot stop request sent to the backend." });
     } catch (error) {
+      if (handleRequestFailure(error)) {
+        return;
+      }
       setFeedback({ kind: "error", message: error.message });
     } finally {
       setSubmittingAutopilot(false);
@@ -796,6 +939,9 @@ function App() {
       setAccountSnapshot(payload.account || null);
       setFeedback({ kind: "success", message: "Account snapshot refreshed." });
     } catch (error) {
+      if (handleRequestFailure(error)) {
+        return;
+      }
       setFeedback({ kind: "error", message: error.message });
     }
   }
@@ -811,6 +957,9 @@ function App() {
       setTradeResult(null);
       setFeedback({ kind: "success", message: "Trade preview updated from the backend guardrails." });
     } catch (error) {
+      if (handleRequestFailure(error)) {
+        return;
+      }
       setFeedback({ kind: "error", message: error.message });
     } finally {
       setSubmittingTrade(false);
@@ -831,6 +980,9 @@ function App() {
       });
       refreshDashboard({ silent: true });
     } catch (error) {
+      if (handleRequestFailure(error)) {
+        return;
+      }
       setFeedback({ kind: "error", message: error.message });
     } finally {
       setSubmittingTrade(false);
@@ -851,6 +1003,9 @@ function App() {
       setFeedback({ kind: "success", message: result.message || "AI command applied." });
       setAiCommand("");
     } catch (error) {
+      if (handleRequestFailure(error)) {
+        return;
+      }
       setFeedback({ kind: "error", message: error.message });
     }
   }
@@ -885,6 +1040,9 @@ function App() {
       const result = payload.result || {};
       setSupportMessages((current) => [...current, { role: "assistant", content: result.answer || "No answer." }]);
     } catch (error) {
+      if (handleRequestFailure(error)) {
+        return;
+      }
       setSupportMessages((current) => [...current, { role: "assistant", content: error.message }]);
     } finally {
       setSubmittingChat(false);
@@ -966,6 +1124,20 @@ function App() {
     { id: "ai", label: "AI Desk" },
   ];
 
+  if (!authToken) {
+    return (
+      <LoginGate
+        email={loginEmail}
+        password={loginPassword}
+        loading={loggingIn}
+        error={loginError}
+        onEmailChange={setLoginEmail}
+        onPasswordChange={setLoginPassword}
+        onSubmit={handleLoginSubmit}
+      />
+    );
+  }
+
   return (
     <main className="app-shell">
       <section className="hero-panel">
@@ -978,11 +1150,15 @@ function App() {
           </p>
         </div>
         <div className="hero-actions">
+          <span className="panel-caption">Signed in as {loginEmail || "operator"}</span>
           <button className="ghost-button" onClick={() => refreshDashboard()} disabled={loadingDashboard}>
             {loadingDashboard ? "Refreshing..." : "Refresh Dashboard"}
           </button>
           <button className="ghost-button" onClick={refreshHealth}>
             Refresh API
+          </button>
+          <button className="ghost-button" onClick={handleLogout}>
+            Sign Out
           </button>
         </div>
       </section>

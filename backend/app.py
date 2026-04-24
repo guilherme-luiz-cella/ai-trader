@@ -2,15 +2,32 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
+
+from argon2 import PasswordHasher
+from argon2.exceptions import InvalidHashError, VerifyMismatchError
 
 from backend import services
 
 HOST = os.getenv("SIGNAL_API_HOST", "0.0.0.0")
 PORT = int(os.getenv("SIGNAL_API_PORT", "8765"))
 CORS_ALLOW_ORIGIN = os.getenv("SIGNAL_API_CORS_ALLOW_ORIGIN", "*")
+API_AUTH_TOKEN = os.getenv("API_AUTH_TOKEN", "").strip()
+APP_LOGIN_EMAIL = os.getenv("APP_LOGIN_EMAIL", "").strip().lower()
+APP_PASSWORD_HASH = os.getenv("APP_PASSWORD_HASH", "").strip()
+APP_SESSION_TTL_SECONDS = max(300, int(os.getenv("APP_SESSION_TTL_SECONDS", "43200")))
+ALLOWED_ACCESS_EMAILS = {
+    email.strip().lower()
+    for email in os.getenv("ALLOWED_ACCESS_EMAILS", "").split(",")
+    if email.strip()
+}
+OPEN_ROUTES = {"/health", "/auth/login"}
+PASSWORD_HASHER = PasswordHasher()
+APP_SESSIONS: dict[str, dict[str, float | str]] = {}
 
 
 class ApiHandler(BaseHTTPRequestHandler):
@@ -19,7 +36,86 @@ class ApiHandler(BaseHTTPRequestHandler):
     def _apply_cors_headers(self) -> None:
         self.send_header("Access-Control-Allow-Origin", CORS_ALLOW_ORIGIN)
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+    def _auth_configured(self) -> bool:
+        return bool(API_AUTH_TOKEN or ALLOWED_ACCESS_EMAILS or APP_LOGIN_EMAIL or APP_PASSWORD_HASH)
+
+    def _request_email(self) -> str:
+        return str(self.headers.get("CF-Access-Authenticated-User-Email", "")).strip().lower()
+
+    def _request_bearer_token(self) -> str:
+        value = str(self.headers.get("Authorization", "")).strip()
+        if not value.startswith("Bearer "):
+            return ""
+        return value[len("Bearer ") :].strip()
+
+    def _purge_expired_sessions(self) -> None:
+        now = time.time()
+        expired_tokens = [
+            token
+            for token, session in APP_SESSIONS.items()
+            if float(session.get("expires_at", 0.0)) <= now
+        ]
+        for token in expired_tokens:
+            APP_SESSIONS.pop(token, None)
+
+    def _session_payload(self, token: str) -> dict[str, float | str] | None:
+        self._purge_expired_sessions()
+        if not token:
+            return None
+        return APP_SESSIONS.get(token)
+
+    def _create_session_token(self, email: str) -> str:
+        token = secrets.token_urlsafe(32)
+        APP_SESSIONS[token] = {
+            "email": email,
+            "issued_at": time.time(),
+            "expires_at": time.time() + APP_SESSION_TTL_SECONDS,
+        }
+        return token
+
+    def _verify_login_password(self, password: str) -> bool:
+        if not APP_PASSWORD_HASH:
+            return False
+        try:
+            return PASSWORD_HASHER.verify(APP_PASSWORD_HASH, password)
+        except (VerifyMismatchError, InvalidHashError):
+            return False
+
+    def _request_is_local(self) -> bool:
+        host, *_rest = self.client_address
+        return host in {"127.0.0.1", "::1"}
+
+    def _is_authorized(self, route: str) -> bool:
+        if route in OPEN_ROUTES:
+            return True
+        if not self._auth_configured():
+            return True
+        if self._request_is_local():
+            return True
+        request_email = self._request_email()
+        if request_email and request_email in ALLOWED_ACCESS_EMAILS:
+            return True
+        request_token = self._request_bearer_token()
+        if API_AUTH_TOKEN and request_token and request_token == API_AUTH_TOKEN:
+            return True
+        session = self._session_payload(request_token)
+        if session is not None:
+            return True
+        return False
+
+    def _require_authorization(self, route: str) -> bool:
+        if self._is_authorized(route):
+            return True
+        self._send_json(
+            {
+                "status": "unauthorized",
+                "message": "Authentication required.",
+            },
+            status=HTTPStatus.UNAUTHORIZED,
+        )
+        return False
 
     def _send_json(self, payload: dict, status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
@@ -53,6 +149,8 @@ class ApiHandler(BaseHTTPRequestHandler):
         route = parsed.path
         query = parse_qs(parsed.query)
         try:
+            if not self._require_authorization(route):
+                return
             if route == "/health":
                 self._send_json(
                     {
@@ -63,6 +161,11 @@ class ApiHandler(BaseHTTPRequestHandler):
                         "notification_status": services.get_notification_status(),
                         "autopilot": services.autopilot_snapshot(),
                         "burn_in_report": services.build_burn_in_validation_report(),
+                        "auth": {
+                            "login_enabled": bool(APP_LOGIN_EMAIL and APP_PASSWORD_HASH),
+                            "cloudflare_access_enabled": bool(ALLOWED_ACCESS_EMAILS),
+                            "api_token_enabled": bool(API_AUTH_TOKEN),
+                        },
                     }
                 )
                 return
@@ -167,11 +270,40 @@ class ApiHandler(BaseHTTPRequestHandler):
         route = parsed.path
         try:
             payload = self._read_json_body()
+            if route == "/auth/login":
+                submitted_email = str(payload.get("email", "")).strip().lower()
+                submitted_password = str(payload.get("password", ""))
+                if not APP_LOGIN_EMAIL or not APP_PASSWORD_HASH:
+                    self._send_json({"status": "error", "message": "App login is not configured."}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                if submitted_email != APP_LOGIN_EMAIL or not self._verify_login_password(submitted_password):
+                    self._send_json({"status": "unauthorized", "message": "Invalid email or password."}, status=HTTPStatus.UNAUTHORIZED)
+                    return
+                session_token = self._create_session_token(submitted_email)
+                self._send_json(
+                    {
+                        "status": "ok",
+                        "auth": {
+                            "token": session_token,
+                            "email": submitted_email,
+                            "expires_in_seconds": APP_SESSION_TTL_SECONDS,
+                        },
+                    }
+                )
+                return
+            if not self._require_authorization(route):
+                return
             if route == "/autopilot/start":
                 self._send_json({"status": "ok", "autopilot": services.start_autopilot(payload)})
                 return
             if route == "/autopilot/stop":
                 self._send_json({"status": "ok", "autopilot": services.stop_autopilot()})
+                return
+            if route == "/auth/logout":
+                request_token = self._request_bearer_token()
+                if request_token:
+                    APP_SESSIONS.pop(request_token, None)
+                self._send_json({"status": "ok"})
                 return
             if route == "/live/capture":
                 symbol = str(payload.get("symbol", services.CHECK_SYMBOL))
