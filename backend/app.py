@@ -366,6 +366,7 @@ class ApiHandler(BaseHTTPRequestHandler):
 def main() -> None:
     services.ensure_llm_startup_logged()
     services.reconcile_interrupted_autopilot_state()
+    services.maybe_resume_autopilot_on_startup()
     with ThreadingHTTPServer((HOST, PORT), ApiHandler) as server:
         print(f"Backend API running at http://{HOST}:{PORT}")
         server.serve_forever()

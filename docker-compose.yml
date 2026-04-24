@@ -22,12 +22,11 @@ services:
     restart: unless-stopped
     build:
       context: .
-      dockerfile: Dockerfile.frontend
-    environment:
-      VITE_API_BASE_URL: "/api"
-      VITE_DEV_API_TARGET: "http://signal-api:8765"
+      dockerfile: Dockerfile.web
+      args:
+        VITE_API_BASE_URL: /api
     depends_on:
       signal-api:
         condition: service_healthy
     ports:
-      - "3000:3000"
+      - "3000:80"

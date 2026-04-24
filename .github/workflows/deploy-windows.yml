@@ -29,6 +29,11 @@ jobs:
           fetch-depth: 0
           clean: true
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Ensure workspace matches pushed commit
         run: |
           git fetch --all --prune
@@ -47,6 +52,15 @@ jobs:
             throw "Missing .env on the Windows runner workspace. Create it once on the runner machine before using this workflow."
           }
 
+      - name: Install backend test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-api.txt
+
+      - name: Run unattended hardening tests
+        run: |
+          python -m unittest tests/test_unattended_hardening.py
+
       - name: Rebuild and restart app
         run: |
           docker compose -f docker-compose.yml up -d --build --remove-orphans signal-api frontend
@@ -55,6 +69,10 @@ jobs:
         run: |
           Start-Sleep -Seconds 5
           Invoke-WebRequest -UseBasicParsing http://localhost:8765/health | Select-Object -ExpandProperty Content
+
+      - name: Verify frontend health
+        run: |
+          Invoke-WebRequest -UseBasicParsing http://localhost:3000/health | Select-Object -ExpandProperty Content
 
       - name: Show running services
         run: |

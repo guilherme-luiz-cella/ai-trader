@@ -105,6 +105,7 @@ AUTOPILOT_BURNIN_MIN_FINALIZATION_SUCCESS_RATE = max(0.0, float(os.getenv("AUTOP
 PAPER_TRADE_MIN_AGE_SECONDS = max(60, int(os.getenv("PAPER_TRADE_MIN_AGE_SECONDS", "300")))
 PAPER_TRADE_PROFIT_THRESHOLD_PCT = max(0.0, float(os.getenv("PAPER_TRADE_PROFIT_THRESHOLD_PCT", "0.20")))
 LIVE_AUTOPILOT_MIN_PAPER_FEEDBACK_ROWS = max(0, int(os.getenv("LIVE_AUTOPILOT_MIN_PAPER_FEEDBACK_ROWS", "5")))
+AUTOPILOT_AUTO_RESUME_ENABLED = os.getenv("AUTOPILOT_AUTO_RESUME_ENABLED", "true").lower() == "true"
 
 
 def parse_symbol_list(raw: str) -> list[str]:
@@ -240,6 +241,11 @@ AUTOPILOT_STATE: dict[str, Any] = {
     "alerts": [],
     "unattended_mode": False,
     "burn_in_report": {},
+    "resume_on_boot": False,
+    "resume_config": {},
+    "auto_resume_status": "idle",
+    "auto_resume_last_attempt_at": None,
+    "auto_resume_last_result": {},
 }
 
 BINANCE_HTTP_LOCK = threading.Lock()
@@ -690,7 +696,7 @@ def reconcile_execution_candidates(persisted: dict[str, Any]) -> list[dict[str, 
         candidates.append(latest_intent)
     for record in reversed(recent_records):
         status = str(record.get("status") or "")
-        if status not in {"intent_recorded", "uncertain", "executed"}:
+        if status not in {"intent_recorded", "uncertain"}:
             continue
         fingerprint = str(record.get("execution_fingerprint") or "")
         if fingerprint and any(str(item.get("execution_fingerprint") or "") == fingerprint for item in candidates):
@@ -710,7 +716,6 @@ def set_reconciliation_state(state: str, *, details: dict[str, Any] | None = Non
 
 def derive_interrupted_reconciliation_state(snapshot: dict[str, Any]) -> str:
     latest_intent = dict(snapshot.get("latest_execution_intent") or {})
-    latest_trade = dict(snapshot.get("latest_trade_result") or {})
     finalization_status = str(snapshot.get("finalization_status") or "")
     stage = str(latest_intent.get("stage") or "").strip().lower()
     if finalization_status in {"pending", "running"}:
@@ -721,9 +726,7 @@ def derive_interrupted_reconciliation_state(snapshot: dict[str, Any]) -> str:
         return "interrupted_after_buy"
     if stage == "signal_sell":
         return "interrupted_after_sell"
-    if str((latest_trade.get("signal_trade") or {}).get("status") or "") in {"executed", "submitted"}:
-        return "partial_execution_needs_review"
-    return "interrupted_run_needs_review"
+    return "clean"
 
 
 def reconcile_interrupted_autopilot_state() -> dict[str, Any]:
@@ -5412,6 +5415,7 @@ def run_autopilot(config: dict[str, Any], run_id: int) -> None:
                 finalization_status=finalization_status,
                 finalization_result=finalization_result,
                 final_stop_reason="goal_already_reached_finalized",
+                latest_execution_intent={},
             )
             record_autopilot_run_summary(
                 run_id=run_id,
@@ -5428,7 +5432,7 @@ def run_autopilot(config: dict[str, Any], run_id: int) -> None:
             )
             return
         if planned_cycles <= 0 and not continue_until_goal:
-            update_autopilot_state(running=False, status="completed", stop_requested=False, final_stop_reason="planned_cycles_completed")
+            update_autopilot_state(running=False, status="completed", stop_requested=False, final_stop_reason="planned_cycles_completed", latest_execution_intent={})
             record_autopilot_run_summary(
                 run_id=run_id,
                 allow_live=bool(config.get("allow_live", False)),
@@ -6028,6 +6032,7 @@ def run_autopilot(config: dict[str, Any], run_id: int) -> None:
                 extra_cycles_used=extra_cycles_used,
                 failed_cycles_in_row=failed_cycles_in_row,
                 final_stable_target_asset=stable_asset,
+                latest_execution_intent={},
                 latest_trade_result={
                     "raw_signal": raw_signal,
                     "override_reason": signal_resolution.get("override_reason", ""),
@@ -6089,6 +6094,7 @@ def run_autopilot(config: dict[str, Any], run_id: int) -> None:
                     finalization_status=finalization_status,
                     finalization_result=finalization_result,
                     final_stop_reason="goal_reached_finalized",
+                    latest_execution_intent={},
                 )
                 set_reconciliation_state("clean" if finalization_status == "completed" else "interrupted_during_finalization", details=finalization_result, requires_human_review=finalization_status != "completed")
                 record_autopilot_run_summary(
@@ -6112,6 +6118,7 @@ def run_autopilot(config: dict[str, Any], run_id: int) -> None:
                     status="completed",
                     stop_requested=False,
                     final_stop_reason="max_failed_cycles_reached",
+                    latest_execution_intent={},
                 )
                 record_autopilot_run_summary(
                     run_id=run_id,
@@ -6129,7 +6136,7 @@ def run_autopilot(config: dict[str, Any], run_id: int) -> None:
                 return
             cycle_index += 1
             if wait_for_autopilot_interval(interval_seconds):
-                update_autopilot_state(running=False, status="cancelled", stop_requested=False)
+                update_autopilot_state(running=False, status="cancelled", stop_requested=False, latest_execution_intent={})
                 record_autopilot_run_summary(
                     run_id=run_id,
                     allow_live=bool(config.get("allow_live", False)),
@@ -6187,6 +6194,7 @@ def normalize_autopilot_config(config: dict[str, Any] | None) -> dict[str, Any]:
         "alerting_enabled": bool(raw.get("alerting_enabled", AUTOPILOT_ALERTING_ENABLED)),
         "alert_webhook_url": str(raw.get("alert_webhook_url", AUTOPILOT_ALERT_WEBHOOK_URL or "") or ""),
         "manual_reconciliation_ack": bool(raw.get("manual_reconciliation_ack", False)),
+        "resume_on_boot": bool(raw.get("resume_on_boot", bool(raw.get("allow_live", False)) or bool(raw.get("unattended_mode", False)))),
     }
     if float(raw.get("goal_value", 0.0) or 0.0) > 0:
         normalized["goal_value"] = float(raw.get("goal_value", 0.0))
@@ -6222,6 +6230,91 @@ def normalize_autopilot_config(config: dict[str, Any] | None) -> dict[str, Any]:
             normalized[field] = str(value)
 
     return normalized
+
+
+def build_resumable_autopilot_config(config: dict[str, Any] | None) -> dict[str, Any]:
+    resumable = normalize_autopilot_config(config)
+    resumable["manual_reconciliation_ack"] = False
+    return json.loads(json.dumps(resumable))
+
+
+def should_auto_resume_autopilot(snapshot: dict[str, Any]) -> bool:
+    if not AUTOPILOT_AUTO_RESUME_ENABLED:
+        return False
+    if not bool(snapshot.get("resume_on_boot", False)):
+        return False
+    if bool(snapshot.get("stop_requested", False)):
+        return False
+    if str(snapshot.get("reconciliation_state") or "clean") != "clean":
+        return False
+    if bool(snapshot.get("requires_human_review", False)):
+        return False
+    if not isinstance(snapshot.get("resume_config"), dict) or not dict(snapshot.get("resume_config") or {}):
+        return False
+    status = str(snapshot.get("status") or "")
+    return bool(snapshot.get("running", False)) or status in {"interrupted", "running", "starting"}
+
+
+def maybe_resume_autopilot_on_startup() -> dict[str, Any]:
+    snapshot = autopilot_snapshot()
+    if not should_auto_resume_autopilot(snapshot):
+        return {
+            "status": "skipped",
+            "reason": "resume_conditions_not_met",
+            "resume_enabled": AUTOPILOT_AUTO_RESUME_ENABLED,
+        }
+
+    attempted_at = utc_now_iso()
+    resume_config = build_resumable_autopilot_config(snapshot.get("resume_config"))
+    try:
+        autopilot = start_autopilot(resume_config)
+    except Exception as exc:
+        update_autopilot_state(
+            resume_on_boot=False,
+            auto_resume_status="resume_failed",
+            auto_resume_last_attempt_at=attempted_at,
+            auto_resume_last_result={
+                "status": "error",
+                "attempted_at": attempted_at,
+                "message": str(exc),
+            },
+            last_error=str(exc),
+        )
+        emit_autopilot_alert(
+            "autopilot_auto_resume_failed",
+            "error",
+            f"Autopilot auto-resume failed: {exc}",
+            requires_human_review=False,
+            details={"resume_config": resume_config},
+        )
+        return {
+            "status": "error",
+            "attempted_at": attempted_at,
+            "message": str(exc),
+        }
+
+    update_autopilot_state(
+        auto_resume_status="resumed",
+        auto_resume_last_attempt_at=attempted_at,
+        auto_resume_last_result={
+            "status": "ok",
+            "attempted_at": attempted_at,
+            "run_id": int((autopilot or {}).get("run_id", 0) or 0),
+        },
+    )
+    append_autopilot_log(
+        {
+            "timestamp": attempted_at,
+            "event": "auto_resume",
+            "status": "ok",
+            "run_id": int((autopilot or {}).get("run_id", 0) or 0),
+        }
+    )
+    return {
+        "status": "ok",
+        "attempted_at": attempted_at,
+        "run_id": int((autopilot or {}).get("run_id", 0) or 0),
+    }
 
 
 def start_autopilot(config: dict[str, Any]) -> dict[str, Any]:
@@ -6310,6 +6403,11 @@ def start_autopilot(config: dict[str, Any]) -> dict[str, Any]:
                 "alerts": [],
                 "unattended_mode": bool(normalized_config.get("unattended_mode", False)),
                 "burn_in_report": build_burn_in_validation_report(),
+                "resume_on_boot": bool(normalized_config.get("resume_on_boot", False)),
+                "resume_config": build_resumable_autopilot_config(normalized_config),
+                "auto_resume_status": "armed" if bool(normalized_config.get("resume_on_boot", False)) else "disabled",
+                "auto_resume_last_attempt_at": None,
+                "auto_resume_last_result": {},
                 "live_start_gate": live_start_gate,
                 "last_error": "",
             }
@@ -6322,7 +6420,12 @@ def start_autopilot(config: dict[str, Any]) -> dict[str, Any]:
 
 def stop_autopilot() -> dict[str, Any]:
     AUTOPILOT_STOP_EVENT.set()
-    update_autopilot_state(stop_requested=True, status="stopping")
+    update_autopilot_state(
+        stop_requested=True,
+        status="stopping",
+        resume_on_boot=False,
+        auto_resume_status="stopped_manually",
+    )
     return autopilot_snapshot()
 
 

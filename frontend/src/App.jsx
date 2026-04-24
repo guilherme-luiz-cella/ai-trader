@@ -877,6 +877,7 @@ function App() {
       : Number(config.decision_min_confidence || decision?.decision_min_confidence || 0.55);
     const body = {
       allow_live: allowLive,
+      resume_on_boot: allowLive,
       symbol: config.live_symbol,
       auto_rebalance_enabled: false,
       decision_min_confidence: decisionFloor,

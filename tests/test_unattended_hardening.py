@@ -82,6 +82,11 @@ class UnattendedHardeningTests(unittest.TestCase):
                 "alerts": [],
                 "unattended_mode": False,
                 "burn_in_report": {},
+                "resume_on_boot": False,
+                "resume_config": {},
+                "auto_resume_status": "idle",
+                "auto_resume_last_attempt_at": None,
+                "auto_resume_last_result": {},
             }
         )
 
@@ -252,6 +257,75 @@ class UnattendedHardeningTests(unittest.TestCase):
 
         self.assertEqual(truth["status"], "filled")
         self.assertEqual(truth["client_order_id"], "abc123")
+
+    @patch("backend.services.emit_autopilot_alert")
+    @patch("backend.services.get_account_snapshot")
+    @patch("backend.services.get_wallet_snapshot")
+    def test_restart_between_cycles_without_pending_execution_is_clean(self, mock_wallet, mock_account, _mock_alert) -> None:
+        payload = {
+            **services.autopilot_snapshot(),
+            "running": True,
+            "status": "running",
+            "symbol": "BTC/USDT",
+            "latest_execution_intent": {},
+            "latest_trade_result": {
+                "signal_trade": {
+                    "status": "executed",
+                    "symbol": "BTC/USDT",
+                }
+            },
+        }
+        services._atomic_write_json(services.AUTOPILOT_STATE_PATH, payload)
+        services.append_execution_journal(
+            {
+                "run_id": 7,
+                "cycle": 2,
+                "stage": "signal_buy",
+                "symbol": "BTC/USDT",
+                "execution_fingerprint": "filled-old-order",
+                "status": "executed",
+            }
+        )
+        mock_wallet.return_value = {"captured_at": "2026-04-16T00:00:00Z", "estimated_total_usdt": 100.0, "asset_count": 1, "balances": []}
+        mock_account.return_value = {"symbol": "BTC/USDT", "base_free": 0.001, "quote_free": 20.0}
+
+        report = services.reconcile_interrupted_autopilot_state()
+
+        self.assertEqual(report["reconciliation_state"], "clean")
+        self.assertFalse(report["requires_human_review"])
+        self.assertEqual(report["exchange_reconciliations"], [])
+
+    @patch("backend.services.start_autopilot")
+    def test_auto_resume_on_startup_restarts_clean_live_run(self, mock_start) -> None:
+        payload = {
+            **services.autopilot_snapshot(),
+            "running": False,
+            "status": "interrupted",
+            "stop_requested": False,
+            "reconciliation_state": "clean",
+            "requires_human_review": False,
+            "resume_on_boot": True,
+            "resume_config": {
+                "allow_live": True,
+                "symbol": "BTC/USDT",
+                "preview_gate_passed": True,
+                "max_api_latency_ms": 1200,
+                "max_ticker_age_ms": 3000,
+                "max_spread_bps": 20.0,
+                "max_failed_cycles_in_row": 8,
+                "max_runtime_minutes": 240,
+            },
+        }
+        services.AUTOPILOT_STATE.update(payload)
+        mock_start.return_value = {"run_id": 8, "status": "starting"}
+
+        result = services.maybe_resume_autopilot_on_startup()
+
+        self.assertEqual(result["status"], "ok")
+        mock_start.assert_called_once()
+        resume_call = mock_start.call_args.args[0]
+        self.assertTrue(resume_call["allow_live"])
+        self.assertTrue(resume_call["resume_on_boot"])
 
 
 if __name__ == "__main__":
