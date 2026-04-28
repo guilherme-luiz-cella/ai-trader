@@ -1339,12 +1339,27 @@ def ensure_latency_monitor(symbol: str | None = None) -> None:
 
 
 def normalize_symbol(symbol: str) -> str:
-    symbol = (symbol or "").strip().upper()
-    if not symbol:
+    raw = str(symbol or "").strip().upper()
+    if not raw:
         return "BTC/USDT"
-    if "/" in symbol:
-        return symbol
-    return f"{symbol}/USDT"
+    compact = re.sub(r"[^A-Z0-9/]", "", raw)
+    if not compact:
+        return "BTC/USDT"
+    if "/" in compact:
+        parts = [part for part in compact.split("/") if part]
+        base = parts[0] if parts else "BTC"
+        quote = parts[1] if len(parts) > 1 else "USDT"
+        quote = quote if quote in {"USDT", "USDC", "FDUSD", "BUSD", "BTC", "ETH", "BNB", "BRL"} else "USDT"
+        if quote and base.endswith(quote):
+            base = base[: -len(quote)]
+        return f"{base or 'BTC'}/{quote}"
+
+    known_quotes = ("FDUSD", "USDT", "USDC", "BUSD", "BTC", "ETH", "BNB", "BRL")
+    for quote in known_quotes:
+        idx = compact.find(quote)
+        if idx > 0:
+            return f"{compact[:idx]}/{quote}"
+    return f"{compact}/USDT"
 
 
 def split_symbol_assets(symbol: str) -> tuple[str, str]:
