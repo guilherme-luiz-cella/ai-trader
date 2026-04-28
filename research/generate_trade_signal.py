@@ -149,6 +149,143 @@ def _row_preview(row: pd.Series, max_items: int = 20) -> dict[str, Any]:
     return preview
 
 
+def _numeric_row_fields(row: pd.Series, columns: list[str]) -> dict[str, float]:
+    values: dict[str, float] = {}
+    for column in columns:
+        try:
+            if hasattr(row, "index") and column not in row.index:
+                continue
+        except TypeError:
+            pass
+        value = row.get(column, None) if hasattr(row, "get") else None
+        if pd.isna(value):
+            continue
+        try:
+            values[column] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return values
+
+
+def _row_float(row: pd.Series, column: str, default: float = 0.0) -> float:
+    try:
+        value = row.get(column, default) if hasattr(row, "get") else default
+        if pd.isna(value):
+            return float(default)
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def build_llm_market_snapshot(
+    probability_up: float,
+    buy_threshold: float,
+    sell_threshold: float,
+    latest_row: pd.Series,
+    market_regime: dict[str, Any] | None = None,
+    data_confidence: float | None = None,
+) -> dict[str, Any]:
+    symbol = str(latest_row.get("symbol", "") or latest_row.get("symbol_code", "") or "").strip()
+    timestamp = str(latest_row.get("timestamp", "") or latest_row.get("date", "") or "").strip()
+    probability = clamp(float(probability_up), 0.0, 1.0)
+    buy_edge = probability - float(buy_threshold)
+    sell_edge = float(sell_threshold) - probability
+    nearest_threshold_distance = min(abs(buy_edge), abs(sell_edge))
+    model_signal = "BUY" if probability >= buy_threshold else ("SELL" if probability <= sell_threshold else "HOLD")
+    data_quality = {
+        "context_coverage": clamp(float(data_confidence if data_confidence is not None else compute_data_context_confidence(latest_row)), 0.0, 1.0),
+        "has_news_context": bool(_row_float(latest_row, "data_has_news_context")),
+        "has_fred_context": bool(_row_float(latest_row, "data_has_fred_context")),
+        "has_gdelt_context": bool(_row_float(latest_row, "data_has_gdelt_context")),
+        "has_fng_context": bool(_row_float(latest_row, "data_has_fng_context")),
+        "has_coingecko_context": bool(_row_float(latest_row, "data_has_cg_context")),
+    }
+    missing_context = [key.removeprefix("has_").removesuffix("_context") for key, present in data_quality.items() if key.startswith("has_") and not present]
+
+    return {
+        "instrument": {
+            "symbol": symbol,
+            "timestamp": timestamp,
+        },
+        "ml_view": {
+            "model_signal": model_signal,
+            "probability_up": probability,
+            "buy_threshold": float(buy_threshold),
+            "sell_threshold": float(sell_threshold),
+            "edge_to_buy_threshold": buy_edge,
+            "edge_to_sell_threshold": sell_edge,
+            "nearest_threshold_distance": nearest_threshold_distance,
+            "distance_from_neutral": probability - 0.5,
+        },
+        "market_regime": dict(market_regime or {}),
+        "price_action": _numeric_row_fields(
+            latest_row,
+            [
+                "close",
+                "return_1",
+                "return_2",
+                "return_4",
+                "close_sma_3",
+                "close_sma_6",
+                "close_sma_10",
+                "close_sma_20",
+                "momentum_10",
+                "momentum_20",
+                "trend_strength",
+                "drawdown_20",
+                "range_pct",
+                "body_pct",
+                "volatility_6",
+                "volatility_10",
+                "volatility_20",
+            ],
+        ),
+        "volume": _numeric_row_fields(latest_row, ["volume", "volume_change_1", "volume_sma_10", "volume_sma_20"]),
+        "sentiment": _numeric_row_fields(
+            latest_row,
+            [
+                "news_count",
+                "headline_score",
+                "summary_score",
+                "total_score",
+                "unique_sources",
+                "news_count_7d",
+                "fng_value",
+                "fng_value_7d",
+                "fng_value_diff_7",
+                "gdelt_crypto_news_count",
+                "gdelt_macro_news_count",
+                "gdelt_total_news_count",
+                "gdelt_total_news_7d",
+                "gdelt_crypto_share",
+                "cg_return_1",
+                "cg_return_7",
+                "cg_volume_change_1",
+            ],
+        ),
+        "macro": _numeric_row_fields(
+            latest_row,
+            [
+                "fred_dff",
+                "fred_cpiaucsl",
+                "fred_unrate",
+                "fred_dgs10",
+                "fred_vixcls",
+                "fred_dff_diff_7",
+                "fred_dff_diff_30",
+                "fred_dgs10_diff_7",
+                "fred_dgs10_diff_30",
+                "fred_vixcls_diff_7",
+                "fred_vixcls_diff_30",
+            ],
+        ),
+        "data_quality": {
+            **data_quality,
+            "missing_context": missing_context,
+        },
+    }
+
+
 def _extract_json_object(text: str) -> dict[str, Any]:
     content = (text or "").strip()
     if not content:
@@ -173,6 +310,8 @@ def generate_llm_overlay(
     buy_threshold: float,
     sell_threshold: float,
     latest_row: pd.Series,
+    market_regime: dict[str, Any] | None = None,
+    data_confidence: float | None = None,
 ) -> dict[str, Any]:
     ensure_llm_startup_logged()
     if not LLM_ENABLED:
@@ -183,9 +322,12 @@ def generate_llm_overlay(
         }
 
     system_prompt = (
-        "You are a conservative trading overlay validator. "
-        "Your job is to validate an ML trading probability, not to invent extra conviction. "
-        "If the evidence is weak, uncertain, malformed, or borderline, choose HOLD. "
+        "You are a conservative crypto trading overlay validator for an ML signal. "
+        "Validate the ML probability using regime, trend, volume, macro, sentiment, and data quality context. "
+        "Do not invent external facts or news. Use only the JSON snapshot. "
+        "Prefer HOLD when the ML edge is near a threshold, data quality is partial, volume is thin, or evidence conflicts. "
+        "Use BUY or SELL only when the ML edge and market context align. "
+        "Confidence guidance: 0.75+ requires strong ML edge and aligned context; 0.40-0.65 means mixed or modest edge; below 0.40 means weak or missing evidence. "
         "Return exactly one JSON object with these keys only: llm_signal, confidence, rationale, risk_flags. "
         "llm_signal must be one of BUY, SELL, HOLD. "
         "confidence must be a JSON number between 0 and 1, not text, not a range, and not a percentage string. "
@@ -193,15 +335,19 @@ def generate_llm_overlay(
         "risk_flags must be an array of short strings."
     )
     user_payload = {
-        "probability_up": probability_up,
-        "buy_threshold": buy_threshold,
-        "sell_threshold": sell_threshold,
-        "latest_row_preview": _row_preview(latest_row),
+        "market_snapshot": build_llm_market_snapshot(
+            probability_up=probability_up,
+            buy_threshold=buy_threshold,
+            sell_threshold=sell_threshold,
+            latest_row=latest_row,
+            market_regime=market_regime,
+            data_confidence=data_confidence,
+        ),
         "instructions": {
             "llm_signal": "BUY|SELL|HOLD",
             "confidence": "numeric float only (e.g. 0.63)",
             "rationale": "short plain-English reason",
-            "risk_flags": ["array of short risk strings"],
+            "risk_flags": ["array of short risk strings such as threshold_proximity, thin_volume, missing_context, regime_conflict"],
         },
     }
 
@@ -730,13 +876,15 @@ def generate_trade_decision(
     else:
         signal = "HOLD"
 
+    data_confidence = compute_data_context_confidence(full_row)
     llm_overlay = generate_llm_overlay(
         probability_up=probability,
         buy_threshold=effective_buy_threshold,
         sell_threshold=effective_sell_threshold,
         latest_row=full_row,
+        market_regime=market_regime,
+        data_confidence=data_confidence,
     )
-    data_confidence = compute_data_context_confidence(full_row)
     merge_result = merge_ml_llm_decision(
         ml_probability_up=probability,
         buy_threshold=effective_buy_threshold,

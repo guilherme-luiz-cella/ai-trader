@@ -30,6 +30,10 @@
 	import frontend_routes
 }
 
+{$API_DOMAIN:api.localhost}:80 {
+	import api_routes
+}
+
 {$APP_DOMAIN:localhost} {
 	tls {$ACME_EMAIL}
 	import frontend_routes
