@@ -3,7 +3,7 @@ import type { AutopilotSnapshot } from "../../domain/entities/AutopilotSnapshot"
 import type { DashboardSnapshot } from "../../domain/entities/DashboardSnapshot";
 import type { OperatorHealth } from "../../domain/entities/OperatorHealth";
 import type { SignalDecision } from "../../domain/entities/SignalDecision";
-import type { TradePreview, TradePreviewRequest } from "../../domain/entities/TradePreview";
+import type { TradePreview, TradePreviewRequest, TradeRequest, TradeResult } from "../../domain/entities/TradePreview";
 import type { BackendConfig } from "../../domain/value-objects/BackendConfig";
 import type { TradingControlRepository, LoginCommand } from "../../application/ports/TradingControlRepository";
 import type { HttpClient } from "../http/HttpClient";
@@ -118,6 +118,10 @@ function readTradePreview(value: unknown): TradePreview {
     minQty: asNumber(source.min_qty),
     minNotional: asNumber(source.min_notional),
     marketPrice: asNumber(source.market_price),
+    message: asString(source.message),
+    spreadBps: asNumber(source.spread_bps),
+    tickerAgeMs: asNumber(source.ticker_age_ms),
+    guardMode: asString(source.guard_mode),
   };
 }
 
@@ -187,6 +191,31 @@ export class HttpTradingControlRepository implements TradingControlRepository {
     const result = asObject(payload.result);
     if (Object.keys(result).length === 0) {
       throw new Error("Backend preview response did not include a preview result.");
+    }
+
+    return readTradePreview(result);
+  }
+
+  async executeTrade(config: BackendConfig, sessionToken: string, request: TradeRequest): Promise<TradeResult> {
+    const payload = await this.httpClient.request<JsonObject>(`${config.baseUrl}/trade/action`, {
+      method: "POST",
+      headers: authHeaders(sessionToken),
+      body: {
+        action: request.action,
+        symbol: request.symbol,
+        quantity: request.quantity,
+        quote_amount: request.quoteAmount,
+        dry_run: request.dryRun,
+        max_api_latency_ms: request.maxApiLatencyMs,
+        max_ticker_age_ms: request.maxTickerAgeMs,
+        max_spread_bps: request.maxSpreadBps,
+        min_trade_cooldown_seconds: request.minTradeCooldownSeconds,
+      },
+    });
+
+    const result = asObject(payload.result);
+    if (Object.keys(result).length === 0) {
+      throw new Error("Backend trade response did not include a trade result.");
     }
 
     return readTradePreview(result);

@@ -6,11 +6,11 @@ import type { DashboardSnapshot } from "../../src/domain/entities/DashboardSnaps
 import type { OperatorHealth } from "../../src/domain/entities/OperatorHealth";
 import type { TradePreview, TradePreviewRequest, TradeRequest, TradeResult } from "../../src/domain/entities/TradePreview";
 import type { BackendConfig } from "../../src/domain/value-objects/BackendConfig";
-import { PreviewTradeUseCase } from "../../src/application/use-cases/PreviewTradeUseCase";
+import { ExecuteTradeUseCase } from "../../src/application/use-cases/ExecuteTradeUseCase";
 import type { TradingControlRepository, LoginCommand } from "../../src/application/ports/TradingControlRepository";
 
-class PreviewRepository implements TradingControlRepository {
-  public latestRequest: TradePreviewRequest | null = null;
+class ExecuteRepository implements TradingControlRepository {
+  public latestRequest: TradeRequest | null = null;
 
   async signIn(_config: BackendConfig, _command: LoginCommand): Promise<AuthSession> {
     throw new Error("unused");
@@ -28,32 +28,33 @@ class PreviewRepository implements TradingControlRepository {
     throw new Error("unused");
   }
 
-  async previewTrade(_config: BackendConfig, _sessionToken: string, request: TradePreviewRequest): Promise<TradePreview> {
+  async previewTrade(_config: BackendConfig, _sessionToken: string, _request: TradePreviewRequest): Promise<TradePreview> {
+    throw new Error("unused");
+  }
+
+  async executeTrade(_config: BackendConfig, _sessionToken: string, request: TradeRequest): Promise<TradeResult> {
     this.latestRequest = request;
 
     return {
-      status: "preview_ready",
+      status: "submitted",
       symbol: request.symbol,
       action: request.action,
-      guardMessage: "Dry-run preview only.",
+      guardMessage: "",
       minimumMessage: "",
       effectiveQuantity: request.quantity,
       sizeCapReason: "",
       minQty: 0.0001,
       minNotional: 5,
       marketPrice: 50000,
+      message: request.dryRun ? "Dry run." : "Live order submitted.",
     };
-  }
-
-  async executeTrade(_config: BackendConfig, _sessionToken: string, _request: TradeRequest): Promise<TradeResult> {
-    throw new Error("unused");
   }
 }
 
-describe("PreviewTradeUseCase", () => {
-  it("preserves the requested mode and normalizes the symbol", async () => {
-    const repository = new PreviewRepository();
-    const useCase = new PreviewTradeUseCase(repository);
+describe("ExecuteTradeUseCase", () => {
+  it("executes the requested live trade without forcing dry mode", async () => {
+    const repository = new ExecuteRepository();
+    const useCase = new ExecuteTradeUseCase(repository);
 
     const result = await useCase.execute({
       backendUrl: "http://127.0.0.1:8765",
@@ -71,31 +72,31 @@ describe("PreviewTradeUseCase", () => {
       },
     });
 
-    expect(result.status).toBe("preview_ready");
+    expect(result.status).toBe("submitted");
     expect(repository.latestRequest?.dryRun).toBe(false);
     expect(repository.latestRequest?.symbol).toBe("BTC/USDT");
   });
 
-  it("rejects unsupported actions", async () => {
-    const repository = new PreviewRepository();
-    const useCase = new PreviewTradeUseCase(repository);
+  it("rejects unsupported trade actions", async () => {
+    const repository = new ExecuteRepository();
+    const useCase = new ExecuteTradeUseCase(repository);
 
     await expect(
       useCase.execute({
         backendUrl: "http://127.0.0.1:8765",
         sessionToken: "session-token",
         request: {
-          action: "hold" as TradePreviewRequest["action"],
+          action: "hold" as TradeRequest["action"],
           symbol: "BTC/USDT",
           quantity: 0.001,
           quoteAmount: 0,
-          dryRun: true,
+          dryRun: false,
           maxApiLatencyMs: 1200,
           maxTickerAgeMs: 3000,
           maxSpreadBps: 20,
           minTradeCooldownSeconds: 5,
         },
       }),
-    ).rejects.toThrow("Unsupported preview action.");
+    ).rejects.toThrow("Unsupported trade action.");
   });
 });

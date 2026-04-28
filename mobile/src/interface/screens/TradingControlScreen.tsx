@@ -1,6 +1,5 @@
 import { ActivityIndicator, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 
-import { DryModeBanner } from "../components/DryModeBanner";
 import { MetricTile } from "../components/MetricTile";
 import { SectionCard } from "../components/SectionCard";
 import { useTradingControlApp } from "../hooks/useTradingControlApp";
@@ -58,12 +57,14 @@ export function TradingControlScreen() {
     overview,
     previewRequest,
     previewResult,
+    tradeResult,
     loading,
     error,
     signIn,
     signOut,
     refresh,
     previewTrade,
+    executeTrade,
     updatePreviewField,
   } = useTradingControlApp();
 
@@ -78,16 +79,14 @@ export function TradingControlScreen() {
           <Text style={styles.eyebrow}>Personal iPhone Operator Client</Text>
           <Text style={styles.title}>AI Trader Mobile</Text>
           <Text style={styles.subtitle}>
-            Read-only status plus guarded preview flows for your own device. This build intentionally excludes live trade execution.
+            Operator status, trade preview, and live trade execution from your own device against the hosted API.
           </Text>
         </View>
-
-        <DryModeBanner />
 
         {!session ? (
           <SectionCard
             title="Sign In"
-            subtitle="Use the backend app login. On iPhone, replace localhost with your Mac LAN IP or a hosted HTTPS URL."
+            subtitle="Use the backend app login. This repo is currently set up to use the hosted reverse-proxy path https://cella.website/api."
           >
             <View style={styles.form}>
               <View style={styles.field}>
@@ -97,7 +96,7 @@ export function TradingControlScreen() {
                   autoCorrect={false}
                   value={backendUrl}
                   onChangeText={setBackendUrl}
-                  placeholder="http://192.168.0.20:8765"
+                  placeholder="https://cella.website/api"
                   placeholderTextColor={theme.colors.textMuted}
                   style={styles.input}
                 />
@@ -150,9 +149,7 @@ export function TradingControlScreen() {
                 </View>
               }
             >
-              <Text style={styles.helperText}>
-                Session TTL from backend: {session.expiresInSeconds} seconds. This mobile client keeps the token in memory only for safer personal-use testing.
-              </Text>
+              <Text style={styles.helperText}>Session TTL from backend: {session.expiresInSeconds} seconds.</Text>
               {error ? <Text style={styles.errorText}>{error}</Text> : null}
             </SectionCard>
 
@@ -248,7 +245,7 @@ export function TradingControlScreen() {
               {autopilot?.lastError ? <Text style={styles.errorText}>{autopilot.lastError}</Text> : null}
             </SectionCard>
 
-            <SectionCard title="Trade Preview" subtitle="Dry-run only. The use case forces dry mode even if the form is changed later.">
+            <SectionCard title="Trade Desk" subtitle="Preview or send the selected request to the backend trade endpoint.">
               <View style={styles.form}>
                 <View style={styles.field}>
                   <Text style={styles.label}>Action</Text>
@@ -324,9 +321,38 @@ export function TradingControlScreen() {
                   </View>
                 </View>
 
-                <Pressable onPress={previewTrade} style={styles.primaryButton} disabled={loading}>
-                  {loading ? <ActivityIndicator color={theme.colors.buttonText} /> : <Text style={styles.primaryButtonText}>Preview Dry Trade</Text>}
-                </Pressable>
+                <View style={styles.field}>
+                  <Text style={styles.label}>Mode</Text>
+                  <View style={styles.chipRow}>
+                    <ActionChip
+                      active={!previewRequest.dryRun}
+                      label="Live"
+                      onPress={() => updatePreviewField("dryRun", false)}
+                    />
+                    <ActionChip
+                      active={previewRequest.dryRun}
+                      label="Dry Run"
+                      onPress={() => updatePreviewField("dryRun", true)}
+                    />
+                  </View>
+                </View>
+
+                <View style={styles.actionRow}>
+                  <Pressable onPress={previewTrade} style={styles.secondaryButtonWide} disabled={loading}>
+                    {loading ? <ActivityIndicator color={theme.colors.text} /> : <Text style={styles.secondaryButtonText}>Preview</Text>}
+                  </Pressable>
+                  <Pressable
+                    onPress={executeTrade}
+                    style={[styles.primaryButton, styles.actionButton]}
+                    disabled={loading}
+                  >
+                    {loading ? (
+                      <ActivityIndicator color={theme.colors.buttonText} />
+                    ) : (
+                      <Text style={styles.primaryButtonText}>{previewRequest.dryRun ? "Run Dry Trade" : "Run Live Trade"}</Text>
+                    )}
+                  </Pressable>
+                </View>
               </View>
 
               {previewResult ? (
@@ -358,6 +384,34 @@ export function TradingControlScreen() {
                   {previewResult.guardMessage ? <Text style={styles.helperText}>{previewResult.guardMessage}</Text> : null}
                 </View>
               ) : null}
+
+              {tradeResult ? (
+                <View style={styles.dataList}>
+                  <View style={styles.separator} />
+                  <View style={styles.dataRow}>
+                    <Text style={styles.dataLabel}>Executed status</Text>
+                    <Text style={styles.dataValue}>{tradeResult.status}</Text>
+                  </View>
+                  <View style={styles.dataRow}>
+                    <Text style={styles.dataLabel}>Executed action</Text>
+                    <Text style={styles.dataValue}>{tradeResult.action}</Text>
+                  </View>
+                  <View style={styles.dataRow}>
+                    <Text style={styles.dataLabel}>Guard mode</Text>
+                    <Text style={styles.dataValue}>{tradeResult.guardMode || "--"}</Text>
+                  </View>
+                  <View style={styles.dataRow}>
+                    <Text style={styles.dataLabel}>Spread bps</Text>
+                    <Text style={styles.dataValue}>{formatNumber(tradeResult.spreadBps || 0, 1)}</Text>
+                  </View>
+                  <View style={styles.dataRow}>
+                    <Text style={styles.dataLabel}>Ticker age ms</Text>
+                    <Text style={styles.dataValue}>{formatNumber(tradeResult.tickerAgeMs || 0, 0)}</Text>
+                  </View>
+                  {tradeResult.message ? <Text style={styles.helperText}>{tradeResult.message}</Text> : null}
+                  {tradeResult.guardMessage ? <Text style={styles.helperText}>{tradeResult.guardMessage}</Text> : null}
+                </View>
+              ) : null}
             </SectionCard>
 
             <SectionCard title="Connection Notes" subtitle="What changes when you move from simulator to your own iPhone">
@@ -365,7 +419,7 @@ export function TradingControlScreen() {
                 `127.0.0.1` works only in the iOS simulator running on your Mac. For a real iPhone on your local network, use your Mac LAN address such as `http://192.168.x.x:8765`.
               </Text>
               <Text style={styles.helperText}>
-                Keep the backend in supervised dry mode. This mobile client intentionally does not expose live execution calls.
+                For a Mac-independent setup, deploy the backend and point this app at the hosted URL `https://cella.website/api` in this repo's Oracle layout.
               </Text>
             </SectionCard>
           </>
@@ -414,6 +468,10 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     gap: theme.spacing.md,
   },
+  actionRow: {
+    flexDirection: "row",
+    gap: theme.spacing.md,
+  },
   halfField: {
     flex: 1,
   },
@@ -441,6 +499,9 @@ const styles = StyleSheet.create({
     minHeight: 48,
     paddingHorizontal: theme.spacing.lg,
   },
+  actionButton: {
+    flex: 1,
+  },
   primaryButtonText: {
     color: theme.colors.buttonText,
     fontSize: 16,
@@ -457,6 +518,18 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     borderWidth: 1,
     borderColor: theme.colors.border,
+  },
+  secondaryButtonWide: {
+    backgroundColor: theme.colors.panelMuted,
+    borderRadius: 999,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: 10,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    minHeight: 48,
+    justifyContent: "center",
+    alignItems: "center",
+    flex: 1,
   },
   secondaryButtonText: {
     color: theme.colors.text,
@@ -490,6 +563,11 @@ const styles = StyleSheet.create({
   },
   dataList: {
     gap: theme.spacing.sm,
+  },
+  separator: {
+    height: 1,
+    backgroundColor: theme.colors.border,
+    marginVertical: theme.spacing.sm,
   },
   dataRow: {
     flexDirection: "row",

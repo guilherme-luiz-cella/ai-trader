@@ -1,4 +1,4 @@
-export type TradePreviewRequest = {
+export type TradeRequest = {
   action: "market_buy" | "market_sell" | "cancel_all_orders";
   symbol: string;
   quantity: number;
@@ -10,7 +10,7 @@ export type TradePreviewRequest = {
   dryRun: boolean;
 };
 
-export type TradePreview = {
+export type TradeResult = {
   status: string;
   symbol: string;
   action: string;
@@ -21,4 +21,11 @@ export type TradePreview = {
   minQty: number;
   minNotional: number;
   marketPrice: number;
+  message?: string;
+  spreadBps?: number;
+  tickerAgeMs?: number;
+  guardMode?: string;
 };
+
+export type TradePreviewRequest = TradeRequest;
+export type TradePreview = TradeResult;

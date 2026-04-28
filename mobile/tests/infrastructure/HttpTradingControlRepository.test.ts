@@ -92,6 +92,24 @@ describe("HttpTradingControlRepository", () => {
           market_price: 50000,
         },
       },
+      {
+        result: {
+          status: "submitted",
+          symbol: "BTC/USDT",
+          action: "market_buy",
+          guard_message: "Live order sent.",
+          minimum_message: "Minimums satisfied.",
+          effective_quantity: 0.001,
+          size_cap_reason: "",
+          min_qty: 0.0001,
+          min_notional: 5,
+          market_price: 50000,
+          message: "Live order submitted.",
+          spread_bps: 2.3,
+          ticker_age_ms: 80,
+          guard_mode: "normal",
+        },
+      },
     ]);
     const repository = new HttpTradingControlRepository(httpClient);
     const config = { baseUrl: "http://127.0.0.1:8765" };
@@ -114,14 +132,31 @@ describe("HttpTradingControlRepository", () => {
       maxSpreadBps: 20,
       minTradeCooldownSeconds: 5,
     });
+    const execution = await repository.executeTrade(config, session.token, {
+      action: "market_buy",
+      symbol: "BTC/USDT",
+      quantity: 0.001,
+      quoteAmount: 0,
+      dryRun: false,
+      maxApiLatencyMs: 1200,
+      maxTickerAgeMs: 3000,
+      maxSpreadBps: 20,
+      minTradeCooldownSeconds: 5,
+    });
 
     expect(session.email).toBe("operator@example.com");
     expect(health.serviceHealth).toBe("healthy");
     expect(dashboard.decision.signal).toBe("BUY");
     expect(autopilot.safeNextAction).toBe("normal_start_allowed");
     expect(preview.guardMessage).toBe("Dry preview only.");
+    expect(execution.message).toBe("Live order submitted.");
     expect(httpClient.calls[4]?.options?.body).toMatchObject({
       dry_run: true,
+      quote_amount: 0,
+    });
+    expect(httpClient.calls[5]?.url).toBe("http://127.0.0.1:8765/trade/action");
+    expect(httpClient.calls[5]?.options?.body).toMatchObject({
+      dry_run: false,
       quote_amount: 0,
     });
   });

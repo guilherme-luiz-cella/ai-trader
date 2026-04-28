@@ -4,7 +4,7 @@ import type { AuthSession } from "../../src/domain/entities/AuthSession";
 import type { AutopilotSnapshot } from "../../src/domain/entities/AutopilotSnapshot";
 import type { DashboardSnapshot } from "../../src/domain/entities/DashboardSnapshot";
 import type { OperatorHealth } from "../../src/domain/entities/OperatorHealth";
-import type { TradePreview, TradePreviewRequest } from "../../src/domain/entities/TradePreview";
+import type { TradePreview, TradePreviewRequest, TradeRequest, TradeResult } from "../../src/domain/entities/TradePreview";
 import type { BackendConfig } from "../../src/domain/value-objects/BackendConfig";
 import { LoadOperatorOverviewUseCase } from "../../src/application/use-cases/LoadOperatorOverviewUseCase";
 import type { TradingControlRepository, LoginCommand } from "../../src/application/ports/TradingControlRepository";
@@ -67,6 +67,14 @@ class OverviewRepository implements TradingControlRepository {
     _sessionToken: string,
     _request: TradePreviewRequest,
   ): Promise<TradePreview> {
+    throw new Error("unused");
+  }
+
+  async executeTrade(
+    _config: BackendConfig,
+    _sessionToken: string,
+    _request: TradeRequest,
+  ): Promise<TradeResult> {
     throw new Error("unused");
   }
 }
